@@ -1588,12 +1588,12 @@ async function transcribeChapterHF(ch, isActive) {
 
 // POST one base64 WAV chunk to the HF Inference API. Returns the model's `chunks`
 // array: [{text, timestamp:[start,end]}]. return_timestamps is required because
-// each chunk is > 30s (Whisper long-form generation).
+// each chunk is > 30s (Whisper long-form generation). Language auto-detected.
 async function hfTranscribeChunk(b64, isActive) {
   const key = getHFKey();
   const body = JSON.stringify({
     inputs: b64,
-    parameters: { return_timestamps: true, language: 'thai' }
+    parameters: { return_timestamps: true }
   });
   let lastErr = '';
   for (let attempt = 0; attempt < 4; attempt++) {
