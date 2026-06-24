@@ -661,7 +661,31 @@ async function listAudioFiles(fid) {
   } while (token);
   return all.sort(naturalSort);
 }
-function audioUrl(id) { return `https://www.googleapis.com/drive/v3/files/${id}?alt=media&access_token=${S.token}`; }
+// ── Audio Blob streaming (ใช้ Authorization header แทน access_token ใน URL) ──
+let _blobUrl = null;
+async function getAudioBlobUrl(fileId) {
+  if (_blobUrl) { URL.revokeObjectURL(_blobUrl); _blobUrl = null; }
+  await ensureToken();
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+    headers: { Authorization: `Bearer ${S.token}` }
+  });
+  if (!r.ok) throw new Error(`Drive API ${r.status}`);
+  // Stream with progress
+  const total = parseInt(r.headers.get('content-length') || '0');
+  let loaded = 0;
+  const reader = r.body.getReader();
+  const chunks = [];
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    if (total) showLoad(`โหลดไฟล์เสียง ${Math.round(loaded/total*100)}%...`);
+  }
+  const blob = new Blob(chunks, { type: r.headers.get('content-type') || 'audio/mpeg' });
+  _blobUrl = URL.createObjectURL(blob);
+  return _blobUrl;
+}
 
 // ════════ FOLDER PICKER ════════
 async function openFolderPicker() {
@@ -884,21 +908,25 @@ async function playChapter(idx, autoPlay=true) {
     S.ccSource = null;
   }
 
-  audio.src = audioUrl(ch.id);
-  audio.playbackRate = S.speeds[S.speedIdx];
-  const saved = S.progress[ch.id] || 0;
-  if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
-
-  // Reconnect CC audio source after src change
-  if (S.ccOn && S.ccAudioCtx) {
-    audio.addEventListener('canplay', () => { setupCCAudioSource(); }, { once:true });
-  }
-
-  if (autoPlay) {
-    // AbortError = ปกติ (เปลี่ยนบทกลางคัน) ไม่ต้องแสดง error
-    audio.play().catch(e => {
-      if (e.name !== 'AbortError') toast('เล่นไม่ได้: ' + e.message);
-    });
+  try {
+    const blobUrl = await getAudioBlobUrl(ch.id);
+    hideLoad();
+    audio.src = blobUrl;
+    audio.playbackRate = S.speeds[S.speedIdx];
+    const saved = S.progress[ch.id] || 0;
+    if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
+    if (S.ccOn && S.ccAudioCtx) {
+      audio.addEventListener('canplay', () => { setupCCAudioSource(); }, { once:true });
+    }
+    if (autoPlay) {
+      audio.play().catch(e => {
+        if (e.name !== 'AbortError') toast('เล่นไม่ได้: ' + e.message);
+      });
+    }
+  } catch(e) {
+    hideLoad();
+    toast('โหลดไฟล์ไม่ได้: ' + e.message, 4000);
+    document.getElementById('play-btn').textContent = '▶';
   }
   updateBookProg();
   renderChapterList(document.getElementById('ch-search-input').value);
@@ -1235,8 +1263,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v1.8 (2026-06-24)
-document.getElementById('app-version').textContent = 'v1.8 (2026-06-24)';
+// AudioBook v1.9 (2026-06-24)
+document.getElementById('app-version').textContent = 'v1.9 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
