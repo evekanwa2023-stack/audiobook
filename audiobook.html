@@ -529,8 +529,15 @@ function saveClientId() {
 // ════════ GOOGLE AUTH ════════
 function onGsiLoad() {
   S.gsiReady = true;
-  if (S.clientId) { showScreen('auth-screen'); initTokenClient(); }
-  else showScreen('setup-screen');
+  initTokenClient(); // เริ่ม token client เสมอ (ใช้ตอน ensureToken)
+
+  // ถ้ามี token ที่ยังใช้ได้อยู่ใน localStorage → อย่าเด้งกลับหน้า login
+  const alreadyLoggedIn = S.token && S.tokenExp > Date.now();
+  if (!alreadyLoggedIn) {
+    if (S.clientId) showScreen('auth-screen');
+    else showScreen('setup-screen');
+  }
+
   // Enable sign-in button
   const btn = document.getElementById('signin-btn');
   const hint = document.getElementById('auth-hint');
@@ -604,9 +611,16 @@ function signOut() {
 }
 async function ensureToken() {
   if (Date.now() < S.tokenExp && S.token) return;
+  // รอ tokenClient พร้อม (กรณี GIS ยังโหลดไม่เสร็จ)
+  let waited = 0;
+  while (!S.tokenClient && waited < 5000) {
+    await new Promise(r => setTimeout(r, 200));
+    waited += 200;
+  }
+  if (!S.tokenClient) { toast('กรุณา Sign in ใหม่'); showScreen('auth-screen'); return; }
   await new Promise(res => {
     const orig = S.tokenClient.callback;
-    S.tokenClient.callback = r => { orig(r); res(); };
+    S.tokenClient.callback = r => { orig && orig(r); res(); };
     S.tokenClient.requestAccessToken({ prompt: '' });
   });
 }
@@ -1221,8 +1235,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v1.7 (2026-06-24)
-document.getElementById('app-version').textContent = 'v1.7 (2026-06-24)';
+// AudioBook v1.8 (2026-06-24)
+document.getElementById('app-version').textContent = 'v1.8 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
