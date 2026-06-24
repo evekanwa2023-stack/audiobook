@@ -400,6 +400,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
               <button class="ctrl" onclick="prevChapter()">⏮</button>
               <button class="ctrl" onclick="seekRel(-15)" style="font-size:12px;">↺15</button>
               <button class="ctrl play" id="play-btn" onclick="togglePlay()">▶</button>
+              <button class="ctrl" onclick="seekRel(15)" style="font-size:12px;">↻15</button>
               <button class="ctrl" onclick="seekRel(30)" style="font-size:12px;">↻30</button>
               <button class="ctrl" onclick="nextChapter()">⏭</button>
               <button class="ctrl" id="bm-toggle" onclick="toggleBmPanel()">🔖</button>
@@ -1044,7 +1045,7 @@ function updateMediaSession() {
   navigator.mediaSession.setActionHandler('previoustrack', prevChapter);
   navigator.mediaSession.setActionHandler('nexttrack', nextChapter);
   try { navigator.mediaSession.setActionHandler('seekbackward', () => seekRel(-15)); } catch(e) {}
-  try { navigator.mediaSession.setActionHandler('seekforward', () => seekRel(30)); } catch(e) {}
+  try { navigator.mediaSession.setActionHandler('seekforward', () => seekRel(15)); } catch(e) {}
 }
 
 // ════════ PLAYBACK ════════
@@ -1104,7 +1105,15 @@ async function playChapter(idx, autoPlay=true) {
 
 function togglePlay() {
   if (S.idx < 0) { if (S.chapters.length) playChapter(0); return; }
-  audio.paused ? audio.play() : audio.pause();
+  if (audio.paused) {
+    audio.playbackRate = S.speed; // ensure rate is correct before play
+    audio.play().catch(() => {});
+  } else {
+    // iOS Safari bug: pausing at non-1.0 rate drains buffer → "record scratch" sound
+    // Fix: reset to 1.0 first, then pause immediately
+    audio.playbackRate = 1.0;
+    audio.pause();
+  }
 }
 function prevChapter() { if (audio.currentTime>5) { audio.currentTime=0; return; } if (S.idx>0) playChapter(S.idx-1); }
 function nextChapter() { if (S.idx<S.chapters.length-1) playChapter(S.idx+1); else toast('จบเล่มแล้ว! 🎉'); }
@@ -1121,17 +1130,7 @@ function setSpeedInput(val) {
   if (!isNaN(n)) { S.speed = n; applySpeed(); }
 }
 function applySpeed() {
-  // WebKit/iOS bug: setting playbackRate on a blob URL can reset currentTime to 0
-  // Save position before, restore after a tick if it changed
-  const savedTime = audio.currentTime;
-  const wasPaused = audio.paused;
   audio.playbackRate = S.speed;
-  // Restore position if WebKit reset it (check after 30ms)
-  setTimeout(() => {
-    if (!wasPaused && Math.abs(audio.currentTime - savedTime) > 0.5 && audio.currentTime < savedTime) {
-      audio.currentTime = savedTime;
-    }
-  }, 30);
   localStorage.setItem('ab_speed', S.speed);
   const inp = document.getElementById('speed-input');
   if (inp) inp.value = S.speed.toFixed(2);
@@ -1298,45 +1297,86 @@ async function startCC() {
   startCCRecording();
 }
 
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+// CC ใช้ได้เฉพาะ Desktop (iOS ไม่รองรับ) — เราใช้ numThreads=1 แทน SharedArrayBuffer
+const _ccSupported = !_isIOS;
+
 async function loadWhisperModel() {
+  // iOS ไม่รองรับ CC
+  if (!_ccSupported) {
+    hideLoad();
+    S.ccLoading = false;
+    S.ccTranscriber = null;
+    document.getElementById('cc-text').textContent = '⚠️ CC ใช้ได้เฉพาะ Chrome/Edge บน Windows/Mac';
+    document.getElementById('cc-model-info').textContent = 'iOS ไม่รองรับ Whisper AI';
+    toast('CC ใช้งานได้เฉพาะ Chrome บนคอมเท่านั้น', 5000);
+    return;
+  }
+
   S.ccLoading = true;
   showLoad('กำลังโหลดโมเดล Whisper AI...\n(ครั้งแรกอาจใช้เวลา 2-5 นาที ขึ้นอยู่กับอินเทอร์เน็ต)', true);
   setLoadProgress(5);
   document.getElementById('cc-text').textContent = 'กำลังโหลดโมเดล AI...';
   document.getElementById('cc-model-info').textContent = 'Whisper Tiny (~39MB) — โหลดครั้งเดียว จากนั้นใช้ทันที';
 
-  try {
-    // Use transformers.js
-    const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-    env.allowLocalModels = false;
-    setLoadProgress(20);
+  // Timeout 5 นาที
+  let _ccTimedOut = false;
+  const _ccTimeout = setTimeout(() => {
+    _ccTimedOut = true;
+    hideLoad(); S.ccLoading = false; S.ccTranscriber = null;
+    document.getElementById('cc-text').textContent = '⚠️ โหลดนานเกินไป — ลอง reload หน้าเว็บแล้วลองใหม่';
+    toast('โหลดโมเดลล้มเหลว (timeout)', 5000);
+  }, 5 * 60 * 1000);
 
-    document.getElementById('loading-msg').textContent = 'โหลดโมเดล Whisper (อาจใช้เวลาสักครู่)...';
+  try {
+    setLoadProgress(10);
+    document.getElementById('loading-msg').textContent = 'กำลังโหลด transformers.js...';
+    const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+    if (_ccTimedOut) return;
+
+    // บังคับ single-threaded WASM — ไม่ต้องการ SharedArrayBuffer
+    // (GitHub Pages ไม่มี COOP/COEP headers → multi-thread mode ค้างเงียบใน Worker)
+    env.allowLocalModels = false;
+    env.allowRemoteModels = true;
+    try { env.backends.onnx.wasm.numThreads = 1; } catch(e) {}
+
+    setLoadProgress(20);
+    document.getElementById('loading-msg').textContent = 'กำลังดาวน์โหลดโมเดล Whisper Tiny (~39MB)...';
 
     S.ccTranscriber = await pipeline(
-      'automatic-speech-recognition',
-      'Xenova/whisper-tiny',
+      'automatic-speech-recognition', 'Xenova/whisper-tiny',
       {
-        language: 'thai',
-        task: 'transcribe',
+        language: 'thai', task: 'transcribe',
         progress_callback: (p) => {
-          if (p.status === 'downloading') {
-            const pct = p.progress || 0;
+          // transformers.js v2 ใช้ status: 'progress' (ไม่ใช่ 'downloading')
+          const pct = typeof p.progress === 'number' ? p.progress : 0;
+          if (pct > 0) {
             setLoadProgress(Math.min(95, 20 + pct * 0.75));
-            document.getElementById('loading-msg').textContent = `โหลดโมเดล: ${Math.round(pct)}%`;
+            document.getElementById('loading-msg').textContent =
+              `โหลดโมเดล ${p.file ? p.file.split('/').pop() : ''}: ${Math.round(pct)}%`;
+          } else if (p.status === 'initiate') {
+            document.getElementById('loading-msg').textContent =
+              `เตรียมไฟล์: ${p.file ? p.file.split('/').pop() : ''}...`;
           }
         },
       }
     );
+    if (_ccTimedOut) return;
+    clearTimeout(_ccTimeout);
     setLoadProgress(100);
     hideLoad();
     S.ccLoading = false;
     toast('โหลดโมเดล Whisper สำเร็จ! 🎉', 3000);
   } catch(e) {
+    clearTimeout(_ccTimeout);
     hideLoad();
     S.ccLoading = false;
     S.ccTranscriber = null;
-    document.getElementById('cc-text').textContent = 'โหลดโมเดลล้มเหลว: ' + e.message;
+    const msg = e?.message || String(e);
+    document.getElementById('cc-text').textContent = '⚠️ โหลดโมเดลล้มเหลว: ' + msg;
+    document.getElementById('cc-model-info').textContent = 'ลองกด CC ใหม่ หรือ reload หน้าเว็บ';
+    console.error('[CC] loadWhisperModel error:', e);
     toast('โหลดโมเดลล้มเหลว ตรวจสอบอินเทอร์เน็ต', 5000);
   }
 }
@@ -1522,8 +1562,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.2 (2026-06-24)
-document.getElementById('app-version').textContent = 'v2.2 (2026-06-24)';
+// AudioBook v2.3 (2026-06-24)
+document.getElementById('app-version').textContent = 'v2.3 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
