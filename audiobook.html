@@ -387,7 +387,14 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
             <div class="book-prog" id="book-prog"></div>
 
             <div class="controls">
-              <button class="ctrl speed-ctrl" id="speed-btn" onclick="cycleSpeed()">1×</button>
+              <div style="display:flex;align-items:center;gap:2px;">
+                <button class="ctrl" onclick="changeSpeed(-1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">−</button>
+                <input type="number" id="speed-input" min="0.5" max="3.0" step="0.05" value="1.00"
+                  style="width:48px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 2px;"
+                  oninput="setSpeedInput(this.value)" onchange="setSpeedInput(this.value)" onclick="this.select()">
+                <span style="font-size:11px;color:var(--text3);">×</span>
+                <button class="ctrl" onclick="changeSpeed(1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">+</button>
+              </div>
               <button class="ctrl" onclick="prevChapter()">⏮</button>
               <button class="ctrl" onclick="seekRel(-15)" style="font-size:12px;">↺15</button>
               <button class="ctrl play" id="play-btn" onclick="togglePlay()">▶</button>
@@ -451,7 +458,7 @@ const S = {
   progress:  JSON.parse(localStorage.getItem('ab_prog') || '{}'),
   durations: JSON.parse(localStorage.getItem('ab_dur')  || '{}'),
   book: null, chapters: [], idx: -1,
-  speeds: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], speedIdx: 2,
+  speed: parseFloat(localStorage.getItem('ab_speed') || '1'),
   folderStack: [], seeking: false,
   allFolders: [], allAudios: [],
   // CC
@@ -843,6 +850,7 @@ async function openBook(bookId) {
     const chapters = await listAudioFiles(book.folderId);
     if (!chapters.length) { hideLoad(); toast('ไม่พบไฟล์เสียง', 3000); return; }
     S.book = book; S.chapters = chapters; S.idx = -1;
+    localStorage.setItem('ab_activebook', book.id);
     document.getElementById('sb-name').textContent = book.name;
     document.getElementById('sb-meta').textContent = `${chapters.length} บท`;
     document.getElementById('np-book').textContent = book.name;
@@ -888,6 +896,43 @@ function renderChapterList(filter='') {
 }
 function filterChapters(q) { renderChapterList(q); }
 
+// ════════ iOS AUDIO UNLOCK ════════
+// iOS Safari requires audio.play() to be called synchronously within user gesture.
+// After any await, the gesture context is gone. Fix: play a silent WAV immediately
+// on user tap to mark the audio element as "user-activated" for the page session.
+function makeSilentWav() {
+  const buf = new ArrayBuffer(44);
+  const v = new DataView(buf);
+  v.setUint32(0, 0x52494646); v.setUint32(4, 36, true); v.setUint32(8, 0x57415645);
+  v.setUint32(12, 0x666d7420); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true); v.setUint32(24, 44100, true); v.setUint32(28, 88200, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true); v.setUint32(36, 0x64617461); v.setUint32(40, 0, true);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+let _silenceUrl = null;
+function iosUnlockAudio() {
+  // Called synchronously from user gesture — establishes play permission for this element
+  if (!_silenceUrl) _silenceUrl = makeSilentWav();
+  audio.src = _silenceUrl;
+  audio.play().catch(() => {});
+}
+
+// ════════ MEDIA SESSION (background/lock screen play) ════════
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: S.idx >= 0 ? stripExt(S.chapters[S.idx]?.name || '') : (S.book?.name || 'AudioBook'),
+    artist: S.book?.name || '',
+    album: 'AudioBook'
+  });
+  navigator.mediaSession.setActionHandler('play', () => audio.play().catch(() => {}));
+  navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+  navigator.mediaSession.setActionHandler('previoustrack', prevChapter);
+  navigator.mediaSession.setActionHandler('nexttrack', nextChapter);
+  try { navigator.mediaSession.setActionHandler('seekbackward', () => seekRel(-15)); } catch(e) {}
+  try { navigator.mediaSession.setActionHandler('seekforward', () => seekRel(30)); } catch(e) {}
+}
+
 // ════════ PLAYBACK ════════
 async function playChapter(idx, autoPlay=true) {
   if (!S.book || idx<0 || idx>=S.chapters.length) return;
@@ -900,6 +945,11 @@ async function playChapter(idx, autoPlay=true) {
   document.querySelectorAll('.ch-item').forEach((el,i) => el.classList.toggle('active', i===idx));
   const item = document.getElementById(`chi-${idx}`);
   if (item) item.scrollIntoView({ block:'nearest', behavior:'smooth' });
+
+  // ── iOS fix: unlock audio synchronously BEFORE any await ──
+  // This marks the <audio> element as user-activated so play() works after async fetch
+  if (autoPlay) iosUnlockAudio();
+
   await ensureToken();
 
   // Reset AudioContext source if CC is active (src change requires reconnect)
@@ -912,7 +962,7 @@ async function playChapter(idx, autoPlay=true) {
     const blobUrl = await getAudioBlobUrl(ch.id);
     hideLoad();
     audio.src = blobUrl;
-    audio.playbackRate = S.speeds[S.speedIdx];
+    audio.playbackRate = S.speed;
     const saved = S.progress[ch.id] || 0;
     if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
     if (S.ccOn && S.ccAudioCtx) {
@@ -923,6 +973,7 @@ async function playChapter(idx, autoPlay=true) {
         if (e.name !== 'AbortError') toast('เล่นไม่ได้: ' + e.message);
       });
     }
+    updateMediaSession();
   } catch(e) {
     hideLoad();
     toast('โหลดไฟล์ไม่ได้: ' + e.message, 4000);
@@ -943,12 +994,19 @@ function seekRel(s) { audio.currentTime = Math.max(0, Math.min(audio.duration||0
 function onSeekInput(v) { S.seeking=true; document.getElementById('cur-time').textContent=fmt((v/100)*(audio.duration||0)); }
 function onSeekChange(v) { S.seeking=false; audio.currentTime=(v/100)*(audio.duration||0); }
 function setVol(v) { audio.volume=parseFloat(v); }
-function cycleSpeed() {
-  S.speedIdx = (S.speedIdx+1) % S.speeds.length;
-  const spd = S.speeds[S.speedIdx];
-  audio.playbackRate = spd;
-  document.getElementById('speed-btn').textContent = `${spd}×`;
-  toast(`ความเร็ว: ${spd}×`, 1500);
+function changeSpeed(dir) {
+  S.speed = Math.round(Math.min(3.0, Math.max(0.5, S.speed + dir * 0.05)) * 100) / 100;
+  applySpeed();
+}
+function setSpeedInput(val) {
+  const n = Math.round(Math.min(3.0, Math.max(0.5, parseFloat(val))) * 100) / 100;
+  if (!isNaN(n)) { S.speed = n; applySpeed(); }
+}
+function applySpeed() {
+  audio.playbackRate = S.speed;
+  localStorage.setItem('ab_speed', S.speed);
+  const inp = document.getElementById('speed-input');
+  if (inp) inp.value = S.speed.toFixed(2);
 }
 function saveProgress() {
   if (S.idx<0||!S.chapters[S.idx]) return;
@@ -974,8 +1032,14 @@ audio.addEventListener('loadedmetadata', () => {
     persist(); renderChapterList(document.getElementById('ch-search-input').value); updateTotalDur();
   }
 });
-audio.addEventListener('play',  () => document.getElementById('play-btn').textContent='⏸');
-audio.addEventListener('pause', () => document.getElementById('play-btn').textContent='▶');
+audio.addEventListener('play',  () => {
+  document.getElementById('play-btn').textContent='⏸';
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+});
+audio.addEventListener('pause', () => {
+  document.getElementById('play-btn').textContent='▶';
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+});
 audio.addEventListener('ended', () => {
   saveProgress();
   setTimeout(() => {
@@ -984,13 +1048,18 @@ audio.addEventListener('ended', () => {
   }, 600);
 });
 audio.addEventListener('error', () => {
-  ensureToken().then(() => {
-    if (S.idx>=0 && S.chapters[S.idx]) {
-      const t=audio.currentTime;
-      audio.src=audioUrl(S.chapters[S.idx].id);
-      audio.addEventListener('loadedmetadata', ()=>{ audio.currentTime=t; audio.play(); }, {once:true});
-    }
-  });
+  // Don't retry on silence URL errors (iOS unlock)
+  if (audio.src === _silenceUrl || (audio.src && audio.src.includes('blob:') && audio.duration === 0)) return;
+  if (S.idx>=0 && S.chapters[S.idx]) {
+    const t = audio.currentTime;
+    ensureToken().then(async () => {
+      try {
+        const blobUrl = await getAudioBlobUrl(S.chapters[S.idx].id);
+        audio.src = blobUrl;
+        audio.addEventListener('loadedmetadata', () => { audio.currentTime = t; audio.play().catch(() => {}); }, { once:true });
+      } catch(e) {}
+    });
+  }
 });
 
 // ════════ PROGRESS ════════
@@ -1015,9 +1084,16 @@ function updateTotalDur() {
 function addBookmark() {
   if (!S.book||S.idx<0) { toast('เล่นบทก่อนก่อน'); return; }
   const ch=S.chapters[S.idx];
-  S.bookmarks.unshift({ id:Date.now(), bookId:S.book.id, chIdx:S.idx, chName:stripExt(ch.name), time:audio.currentTime, label:`${stripExt(ch.name)} @ ${fmt(audio.currentTime)}` });
+  // เก็บ CC text ถ้ากำลังทำงานอยู่
+  const ccText = S.ccOn ? (document.getElementById('cc-text')?.textContent || '') : '';
+  const bm = { id:Date.now(), bookId:S.book.id, chIdx:S.idx, chName:stripExt(ch.name),
+    time:audio.currentTime, label:`${stripExt(ch.name)} @ ${fmt(audio.currentTime)}`,
+    note:'', ccText };
+  S.bookmarks.unshift(bm);
   persist(); renderBmList(); renderChapterList(document.getElementById('ch-search-input').value);
-  toast('เพิ่มบุ๊คมาร์คแล้ว 🔖');
+  toast('เพิ่มบุ๊คมาร์คแล้ว 🔖 — พิมพ์โน้ตในรายการได้เลย');
+  // Focus note input
+  setTimeout(() => { const ni = document.getElementById(`bm-note-${bm.id}`); if(ni) ni.focus(); }, 100);
 }
 function delBookmark(id) {
   S.bookmarks=S.bookmarks.filter(b=>b.id!==id);
@@ -1037,11 +1113,20 @@ function renderBmList() {
   list.innerHTML=bms.map(b=>`<div class="bm-item">
     <div class="bm-ch">${b.chName}</div>
     <div class="bm-label">${b.label}</div>
+    ${b.ccText?`<div style="font-size:11px;color:var(--text3);font-style:italic;margin:2px 0 4px;line-height:1.4;">"${b.ccText}"</div>`:''}
+    <input id="bm-note-${b.id}" type="text" value="${(b.note||'').replace(/"/g,'&quot;')}"
+      placeholder="พิมพ์โน้ต..."
+      onchange="saveBmNote(${b.id},this.value)"
+      style="width:100%;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--text2);font-size:11px;padding:3px 6px;margin-bottom:4px;outline:none;">
     <div class="bm-time">${fmt(b.time)}</div>
     <div class="bm-actions">
       <span class="bm-jump" onclick="jumpBm(${b.id})">▶ ข้ามไป</span>
       <span class="bm-del" onclick="delBookmark(${b.id})">✕ ลบ</span>
     </div></div>`).join('');
+}
+function saveBmNote(id, val) {
+  const bm = S.bookmarks.find(b=>b.id===id);
+  if (bm) { bm.note = val; persist(); }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1053,6 +1138,18 @@ async function toggleCC() {
 
 async function startCC() {
   if (S.ccLoading) return;
+
+  // Create AudioContext within user gesture (required on iOS/Safari)
+  if (!S.ccAudioCtx) {
+    try {
+      S.ccAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    } catch(e) {
+      toast('AudioContext ไม่รองรับ: ' + e.message, 4000);
+      return;
+    }
+  }
+  if (S.ccAudioCtx.state === 'suspended') await S.ccAudioCtx.resume();
+
   S.ccOn = true;
   document.getElementById('cc-panel').classList.remove('hidden');
   document.getElementById('cc-btn').textContent = '🔤 CC ✓';
@@ -1076,7 +1173,7 @@ async function loadWhisperModel() {
   showLoad('กำลังโหลดโมเดล Whisper AI...\n(ครั้งแรกอาจใช้เวลา 2-5 นาที ขึ้นอยู่กับอินเทอร์เน็ต)', true);
   setLoadProgress(5);
   document.getElementById('cc-text').textContent = 'กำลังโหลดโมเดล AI...';
-  document.getElementById('cc-model-info').textContent = 'Whisper Small (~250MB) — โหลดครั้งเดียว จากนั้นใช้ทันที';
+  document.getElementById('cc-model-info').textContent = 'Whisper Tiny (~39MB) — โหลดครั้งเดียว จากนั้นใช้ทันที';
 
   try {
     // Use transformers.js
@@ -1088,7 +1185,7 @@ async function loadWhisperModel() {
 
     S.ccTranscriber = await pipeline(
       'automatic-speech-recognition',
-      'Xenova/whisper-small',
+      'Xenova/whisper-tiny',
       {
         language: 'thai',
         task: 'transcribe',
@@ -1116,9 +1213,7 @@ async function loadWhisperModel() {
 
 function setupCCAudioSource() {
   try {
-    if (!S.ccAudioCtx) {
-      S.ccAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    }
+    if (!S.ccAudioCtx) return false; // Should already be created by startCC()
     if (S.ccAudioCtx.state === 'suspended') S.ccAudioCtx.resume();
 
     // Create source from audio element
@@ -1143,9 +1238,11 @@ function startCCRecording() {
   const dest = S.ccAudioCtx.createMediaStreamDestination();
   S.ccSource.connect(dest);
 
-  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? 'audio/webm;codecs=opus'
-    : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+  // Safari/iOS supports audio/mp4, Chrome/Firefox support audio/webm
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+    : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
+    : MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4'
+    : '';
 
   S.ccChunks = [];
   try {
@@ -1254,8 +1351,14 @@ else if (S.token && S.tokenExp > Date.now()) {
   // Token ยังใช้ได้ → ข้าม login
   restoreUserAvatar();
   showScreen('app');
-  switchView('library');
   renderLibrary();
+  // ถ้ากำลังเปิดหนังสืออยู่ก่อน refresh → เปิดกลับคืน
+  const lastBookId = localStorage.getItem('ab_activebook');
+  if (lastBookId && S.library.find(b => b.id === lastBookId)) {
+    openBook(lastBookId); // เปิด book → switchView('book') เอง
+  } else {
+    switchView('library');
+  }
 } else {
   S.token = null;
   localStorage.removeItem('ab_tok');
@@ -1263,8 +1366,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v1.9 (2026-06-24)
-document.getElementById('app-version').textContent = 'v1.9 (2026-06-24)';
+// AudioBook v2.0 (2026-06-24)
+document.getElementById('app-version').textContent = 'v2.0 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
