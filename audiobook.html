@@ -525,9 +525,19 @@ function onGsiLoad() {
 }
 function onGsiError() {
   const hint = document.getElementById('auth-hint');
-  if (hint) { hint.textContent = 'โหลด Google ไม่ได้ — ลอง refresh หน้าเว็บ'; hint.style.color = 'var(--red)'; }
+  const btn = document.getElementById('signin-btn');
+  const txt = document.getElementById('signin-btn-text');
+  if (hint) { hint.textContent = 'โหลด Google ไม่ได้ — ลอง refresh หน้าเว็บ'; hint.style.color = 'var(--red)'; hint.style.display = 'block'; }
+  if (btn) { btn.disabled = false; btn.style.opacity = '0.7'; btn.style.cursor = 'pointer'; }
+  if (txt) txt.textContent = 'ลองใหม่ (refresh)';
   showScreen(S.clientId ? 'auth-screen' : 'setup-screen');
 }
+// Timeout fallback: ถ้า GIS ไม่โหลดภายใน 8 วินาที ให้แสดง error
+setTimeout(() => {
+  if (!S.gsiReady) {
+    onGsiError();
+  }
+}, 8000);
 function initTokenClient() {
   if (!S.gsiReady || !S.clientId) return;
   S.tokenClient = google.accounts.oauth2.initTokenClient({
@@ -537,6 +547,11 @@ function initTokenClient() {
   });
 }
 function signIn() {
+  if (!S.gsiReady) {
+    toast('Google ยังโหลดไม่เสร็จ — ลอง refresh หน้านี้', 4000);
+    window.location.reload();
+    return;
+  }
   if (!S.tokenClient) { toast('กำลังโหลด...'); return; }
   S.tokenClient.requestAccessToken();
 }
@@ -1087,6 +1102,11 @@ setInterval(() => { if (S.token && S.tokenClient) ensureToken(); }, 45*60*1000);
 // ════════ INIT ════════
 if (!S.clientId) showScreen('setup-screen');
 else showScreen('auth-screen');
+
+// ════════ VERSION ════════
+const APP_VERSION = 'v1.2 (2026-06-24)';
+console.log('AudioBook', APP_VERSION);
+document.title = 'AudioBook Player 🎧 ' + APP_VERSION;
 </script>
 </body>
 </html>
