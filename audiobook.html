@@ -425,7 +425,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 <audio id="audio" crossorigin="anonymous"></audio>
 
-<script src="https://accounts.google.com/gsi/client" onload="onGsiLoad()" onerror="onGsiError()"></script>
+<script async src="https://accounts.google.com/gsi/client" onload="onGsiLoad()" onerror="onGsiError()"></script>
 <script>
 // ════════ STATE ════════
 const S = {
@@ -1104,9 +1104,9 @@ if (!S.clientId) showScreen('setup-screen');
 else showScreen('auth-screen');
 
 // ════════ VERSION ════════
-const APP_VERSION = 'v1.2 (2026-06-24)';
-console.log('AudioBook', APP_VERSION);
-document.title = 'AudioBook Player 🎧 ' + APP_VERSION;
+// AudioBook v1.3 (2026-06-24)
+document.getElementById('app-version').textContent = 'v1.3 (2026-06-24)';
 </script>
+<div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
 </html>
