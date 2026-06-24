@@ -216,6 +216,18 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
       <h3 id="folder-modal-title">📁 เลือกโฟลเดอร์หนังสือ</h3>
       <button class="btn btn-ghost btn-xs" onclick="closeFolderModal()">✕</button>
     </div>
+    <div style="padding:8px 12px;display:flex;gap:8px;border-bottom:1px solid var(--border);align-items:center;">
+      <input id="folder-search" type="text" placeholder="🔍 ค้นหาโฟลเดอร์..."
+        oninput="filterFolders()"
+        style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 10px;color:var(--text);font-size:13px;outline:none;">
+      <select id="folder-sort" onchange="applyFolderSort()"
+        style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 6px;color:var(--text);font-size:12px;cursor:pointer;">
+        <option value="name-asc">ชื่อ A→Z</option>
+        <option value="name-desc">ชื่อ Z→A</option>
+        <option value="date-desc">ใหม่สุด</option>
+        <option value="date-asc">เก่าสุด</option>
+      </select>
+    </div>
     <div class="modal-body" id="folder-list"></div>
     <div class="modal-footer">
       <button class="btn btn-ghost btn-sm" onclick="closeFolderModal()">ยกเลิก</button>
@@ -429,8 +441,11 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 <script>
 // ════════ STATE ════════
 const S = {
-  clientId: localStorage.getItem('ab_cid') || '',
-  token: null, tokenExp: 0, tokenClient: null, gsiReady: false, user: null,
+  clientId: localStorage.getItem('ab_cid') || '667076557152-4jdglnvouuucfq55ffebvlvhlf5jgdf8.apps.googleusercontent.com',
+  token: localStorage.getItem('ab_tok') || null,
+  tokenExp: parseInt(localStorage.getItem('ab_tokexp') || '0'),
+  tokenClient: null, gsiReady: false,
+  user: JSON.parse(localStorage.getItem('ab_user') || 'null'),
   library:   JSON.parse(localStorage.getItem('ab_lib')  || '[]'),
   bookmarks: JSON.parse(localStorage.getItem('ab_bm')   || '[]'),
   progress:  JSON.parse(localStorage.getItem('ab_prog') || '{}'),
@@ -438,6 +453,7 @@ const S = {
   book: null, chapters: [], idx: -1,
   speeds: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], speedIdx: 2,
   folderStack: [], seeking: false,
+  allFolders: [], allAudios: [],
   // CC
   ccOn: false, ccAudioCtx: null, ccSource: null, ccRecorder: null,
   ccTranscriber: null, ccLoading: false, ccChunks: [],
@@ -559,20 +575,29 @@ async function handleToken(resp) {
   if (resp.error) { toast('เข้าสู่ระบบล้มเหลว: ' + resp.error, 4000); return; }
   S.token = resp.access_token;
   S.tokenExp = Date.now() + (resp.expires_in * 1000) - 60000;
+  localStorage.setItem('ab_tok', S.token);
+  localStorage.setItem('ab_tokexp', S.tokenExp.toString());
   try {
     const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${S.token}` } });
     S.user = await r.json();
-    const av = document.getElementById('user-avatar');
-    if (S.user.picture) av.innerHTML = `<img src="${S.user.picture}" alt="">`;
-    else av.textContent = (S.user.name || '?')[0].toUpperCase();
+    localStorage.setItem('ab_user', JSON.stringify(S.user));
   } catch(e) {}
+  restoreUserAvatar();
   showScreen('app');
   switchView('library');
   renderLibrary();
 }
+function restoreUserAvatar() {
+  if (!S.user) return;
+  const av = document.getElementById('user-avatar');
+  if (!av) return;
+  if (S.user.picture) av.innerHTML = `<img src="${S.user.picture}" alt="">`;
+  else av.textContent = (S.user.name || '?')[0].toUpperCase();
+}
 function signOut() {
   if (S.token) { try { google.accounts.oauth2.revoke(S.token); } catch(e) {} }
-  S.token = null;
+  S.token = null; S.user = null;
+  localStorage.removeItem('ab_tok'); localStorage.removeItem('ab_tokexp'); localStorage.removeItem('ab_user');
   audio.pause(); audio.src = '';
   stopCC();
   showScreen('auth-screen');
@@ -595,8 +620,20 @@ async function driveList(q, fields='files(id,name)', orderBy='name', pageToken=n
   return r.json();
 }
 async function listFolders(pid='root') {
-  const d = await driveList(`'${pid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`, 'files(id,name)');
+  const d = await driveList(`'${pid}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`, 'files(id,name,modifiedTime)');
   return d.files || [];
+}
+// ── Favorites helpers ──
+function getFavs() { try { return JSON.parse(localStorage.getItem('ab_fav') || '[]'); } catch(e) { return []; } }
+function saveFavs(f) { localStorage.setItem('ab_fav', JSON.stringify(f)); }
+function isFav(id) { return getFavs().some(f => f.id === id); }
+function toggleFav(id, name, e) {
+  e.stopPropagation();
+  let favs = getFavs();
+  if (isFav(id)) { favs = favs.filter(f => f.id !== id); }
+  else { favs.unshift({ id, name }); }
+  saveFavs(favs);
+  renderFolderItems(S.allFolders, S.allAudios);
 }
 async function listAudioFiles(fid) {
   let all=[], token=null;
@@ -622,6 +659,7 @@ async function openFolderPicker() {
 function closeFolderModal() { document.getElementById('folder-modal').classList.add('hidden'); }
 async function renderFolderList(pid, pname) {
   document.getElementById('folder-modal-title').textContent = `📁 ${pname}`;
+  document.getElementById('folder-search').value = '';
   showLoad('กำลังโหลดโฟลเดอร์...');
   try {
     const [folders, audios] = await Promise.all([
@@ -629,29 +667,78 @@ async function renderFolderList(pid, pname) {
       pid !== 'root' ? listAudioFiles(pid) : Promise.resolve([])
     ]);
     hideLoad();
-    const list = document.getElementById('folder-list');
-    list.innerHTML = '';
-    if (S.folderStack.length > 1) {
-      const back = mkFolder('⬅', 'กลับ', '', false);
-      back.querySelector('span:nth-child(2)').style.color = 'var(--text2)';
-      back.onclick = () => { S.folderStack.pop(); const p=S.folderStack[S.folderStack.length-1]; renderFolderList(p.id,p.name); };
-      list.appendChild(back);
-    }
-    if (audios.length > 0) {
-      const use = mkFolder('✅', `ใช้ "${pname}" เป็นหนังสือ`, `${audios.length} ไฟล์เสียง`, false);
-      use.classList.add('folder-use');
-      use.onclick = () => selectBook(pid, pname, audios);
-      list.appendChild(use);
-    }
-    if (!folders.length && !audios.length) {
-      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text3);">ไม่พบโฟลเดอร์หรือไฟล์เสียง</div>';
-    }
-    folders.forEach(f => {
-      const item = mkFolder('📁', f.name, '', true);
-      item.onclick = () => { S.folderStack.push({id:f.id,name:f.name}); renderFolderList(f.id,f.name); };
-      list.appendChild(item);
-    });
+    S.allFolders = folders;
+    S.allAudios = audios;
+    renderFolderItems(folders, audios);
   } catch(e) { hideLoad(); toast('เกิดข้อผิดพลาด: ' + e.message, 4000); }
+}
+function renderFolderItems(folders, audios) {
+  const pid = S.folderStack[S.folderStack.length-1].id;
+  const pname = S.folderStack[S.folderStack.length-1].name;
+  const list = document.getElementById('folder-list');
+  list.innerHTML = '';
+
+  // ── Back button ──
+  if (S.folderStack.length > 1) {
+    const back = mkFolder('⬅', 'กลับ', '', false);
+    back.querySelector('span:nth-child(2)').style.color = 'var(--text2)';
+    back.onclick = () => { S.folderStack.pop(); const p=S.folderStack[S.folderStack.length-1]; renderFolderList(p.id,p.name); };
+    list.appendChild(back);
+  }
+
+  // ── Use this folder as book ──
+  if (audios.length > 0) {
+    const use = mkFolder('✅', `ใช้ "${pname}" เป็นหนังสือ`, `${audios.length} ไฟล์เสียง`, false);
+    use.classList.add('folder-use');
+    use.onclick = () => selectBook(pid, pname, audios);
+    list.appendChild(use);
+  }
+
+  // ── Favorites section (root only) ──
+  if (pid === 'root') {
+    const favs = getFavs();
+    if (favs.length > 0) {
+      const hdr = document.createElement('div');
+      hdr.style = 'padding:6px 14px 2px;font-size:10px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;';
+      hdr.textContent = '⭐ ที่ชอบ';
+      list.appendChild(hdr);
+      favs.forEach(f => {
+        const item = mkFolderItem(f, true);
+        item.onclick = () => { S.folderStack.push({id:f.id,name:f.name}); renderFolderList(f.id,f.name); };
+        list.appendChild(item);
+      });
+      const divider = document.createElement('div');
+      divider.style = 'margin:4px 12px;border-top:1px solid var(--border);';
+      list.appendChild(divider);
+    }
+  }
+
+  // ── Folder list ──
+  if (!folders.length && !audios.length) {
+    list.innerHTML += '<div style="padding:24px;text-align:center;color:var(--text3);">ไม่พบโฟลเดอร์หรือไฟล์เสียง</div>';
+    return;
+  }
+  if (folders.length > 0) {
+    const hdr = document.createElement('div');
+    hdr.style = 'padding:6px 14px 2px;font-size:10px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;';
+    hdr.textContent = pid === 'root' ? '📁 โฟลเดอร์ทั้งหมด' : '📁 โฟลเดอร์ย่อย';
+    list.appendChild(hdr);
+  }
+  folders.forEach(f => {
+    const item = mkFolderItem(f, false);
+    item.onclick = () => { S.folderStack.push({id:f.id,name:f.name}); renderFolderList(f.id,f.name); };
+    list.appendChild(item);
+  });
+}
+function mkFolderItem(f, fromFav) {
+  const d = document.createElement('div');
+  d.className = 'folder-item';
+  const starred = isFav(f.id);
+  d.innerHTML = `<span style="font-size:18px;">📁</span>
+    <span style="flex:1;font-size:13px;">${f.name}${f.modifiedTime?`<br><span style="font-size:10px;color:var(--text3);">${new Date(f.modifiedTime).toLocaleDateString('th-TH')}</span>`:''}</span>
+    <button onclick="toggleFav('${f.id}','${f.name.replace(/'/g,"\\'")}',event)" style="background:none;border:none;cursor:pointer;font-size:16px;padding:2px 6px;opacity:${starred?1:0.3};" title="${starred?'ลบออกจากที่ชอบ':'เพิ่มในที่ชอบ'}">${starred?'⭐':'☆'}</button>
+    <span style="color:var(--text3);">›</span>`;
+  return d;
 }
 function mkFolder(icon, name, sub, hasArr) {
   const d = document.createElement('div');
@@ -660,6 +747,21 @@ function mkFolder(icon, name, sub, hasArr) {
     <span style="flex:1;font-size:13px;">${name}${sub?`<br><span style="font-size:10px;color:var(--text3);">${sub}</span>`:''}
     </span>${hasArr?'<span style="color:var(--text3);">›</span>':''}`;
   return d;
+}
+function filterFolders() {
+  const q = document.getElementById('folder-search').value.toLowerCase().trim();
+  const filtered = q ? S.allFolders.filter(f => f.name.toLowerCase().includes(q)) : S.allFolders;
+  renderFolderItems(filtered, S.allAudios);
+}
+function applyFolderSort() {
+  const v = document.getElementById('folder-sort').value;
+  let sorted = [...S.allFolders];
+  if (v === 'name-asc') sorted.sort((a,b) => a.name.localeCompare(b.name,'th'));
+  else if (v === 'name-desc') sorted.sort((a,b) => b.name.localeCompare(a.name,'th'));
+  else if (v === 'date-desc') sorted.sort((a,b) => new Date(b.modifiedTime||0) - new Date(a.modifiedTime||0));
+  else if (v === 'date-asc') sorted.sort((a,b) => new Date(a.modifiedTime||0) - new Date(b.modifiedTime||0));
+  S.allFolders = sorted;
+  renderFolderItems(sorted, S.allAudios);
 }
 async function selectBook(fid, name, audios) {
   closeFolderModal();
@@ -778,7 +880,12 @@ async function playChapter(idx, autoPlay=true) {
     audio.addEventListener('canplay', () => { setupCCAudioSource(); }, { once:true });
   }
 
-  if (autoPlay) audio.play().catch(e => toast('เล่นไม่ได้: ' + e.message));
+  if (autoPlay) {
+    // AbortError = ปกติ (เปลี่ยนบทกลางคัน) ไม่ต้องแสดง error
+    audio.play().catch(e => {
+      if (e.name !== 'AbortError') toast('เล่นไม่ได้: ' + e.message);
+    });
+  }
   updateBookProg();
   renderChapterList(document.getElementById('ch-search-input').value);
   renderBmList();
@@ -1101,11 +1208,21 @@ setInterval(() => { if (S.token && S.tokenClient) ensureToken(); }, 45*60*1000);
 
 // ════════ INIT ════════
 if (!S.clientId) showScreen('setup-screen');
-else showScreen('auth-screen');
+else if (S.token && S.tokenExp > Date.now()) {
+  // Token ยังใช้ได้ → ข้าม login
+  restoreUserAvatar();
+  showScreen('app');
+  switchView('library');
+  renderLibrary();
+} else {
+  S.token = null;
+  localStorage.removeItem('ab_tok');
+  showScreen('auth-screen');
+}
 
 // ════════ VERSION ════════
-// AudioBook v1.3 (2026-06-24)
-document.getElementById('app-version').textContent = 'v1.3 (2026-06-24)';
+// AudioBook v1.6 (2026-06-24)
+document.getElementById('app-version').textContent = 'v1.6 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
