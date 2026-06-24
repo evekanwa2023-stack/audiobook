@@ -1473,7 +1473,22 @@ window.addEventListener('keydown', e => {
 // ════════ PERSIST ════════
 window.addEventListener('visibilitychange', () => { if (document.hidden) saveProgress(); });
 window.addEventListener('beforeunload', saveProgress);
-setInterval(() => { if (S.token && S.tokenClient) ensureToken(); }, 45*60*1000);
+// Proactive token refresh (ทุก 5 นาที) — ถ้าเหลือ < 10 นาที refresh เงียบๆ
+// เหมือน BookVoice: ไม่ต้อง reconnect บ่อย เพราะ refresh ก่อน expire
+setInterval(async () => {
+  if (!S.token || !S.tokenClient) return;
+  const timeLeft = S.tokenExp - Date.now();
+  if (timeLeft < 10 * 60 * 1000) { // เหลือ < 10 นาที → refresh ทันที
+    try { await ensureToken(); } catch(e) {}
+  }
+}, 5 * 60 * 1000);
+// Check ครั้งแรกหลัง 30 วินาที (ป้องกัน token ที่ restore มาและใกล้ expire แล้ว)
+setTimeout(async () => {
+  if (!S.token || !S.tokenClient) return;
+  if (S.tokenExp - Date.now() < 10 * 60 * 1000) {
+    try { await ensureToken(); } catch(e) {}
+  }
+}, 30 * 1000);
 
 // ════════ INIT ════════
 if (!S.clientId) showScreen('setup-screen');
@@ -1489,6 +1504,17 @@ else if (S.token && S.tokenExp > Date.now()) {
   } else {
     switchView('library');
   }
+} else if (S.token) {
+  // Token หมดอายุ แต่เคย login ไว้ → ลอง silent refresh ก่อน (ไม่แสดง popup)
+  // GIS จะ refresh เงียบๆ ถ้า user เคย grant permission ไว้แล้ว
+  restoreUserAvatar();
+  showScreen('app');
+  renderLibrary();
+  const lastBookId2 = localStorage.getItem('ab_activebook');
+  if (lastBookId2 && S.library.find(b => b.id === lastBookId2)) openBook(lastBookId2);
+  else switchView('library');
+  // onGsiLoad จะเรียก initTokenClient → ensureToken จะ refresh อัตโนมัติก่อน fetch ครั้งแรก
+  toast('กำลัง refresh token...', 2000);
 } else {
   S.token = null;
   localStorage.removeItem('ab_tok');
@@ -1496,8 +1522,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.1 (2026-06-24)
-document.getElementById('app-version').textContent = 'v2.1 (2026-06-24)';
+// AudioBook v2.2 (2026-06-24)
+document.getElementById('app-version').textContent = 'v2.2 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
