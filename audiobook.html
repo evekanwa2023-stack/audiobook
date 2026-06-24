@@ -165,7 +165,12 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 .vol-slider::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:var(--text2); cursor:pointer; }
 
 /* CC Panel */
-.cc-panel { flex-shrink:0; border-top:1px solid var(--border); padding:10px 14px; background:rgba(0,0,0,.35); }
+.cc-panel { position:fixed; left:0; right:0; bottom:0; z-index:9000;
+  border-top:1px solid var(--border);
+  padding:8px 16px calc(8px + env(safe-area-inset-bottom));
+  background:rgba(10,10,14,.93); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  box-shadow:0 -6px 22px rgba(0,0,0,.45); max-height:38vh; overflow-y:auto; }
+.cc-panel .cc-head, .cc-panel .cc-text, .cc-panel .cc-model-info { max-width:920px; margin-left:auto; margin-right:auto; }
 .cc-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:5px; }
 .cc-label { font-size:10px; color:var(--text3); font-weight:700; letter-spacing:.5px; display:flex; align-items:center; gap:5px; }
 .cc-dot { width:6px; height:6px; border-radius:50%; background:var(--green); animation:pulse 1.2s ease infinite; }
@@ -198,6 +203,16 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 /* CC loading progress */
 .cc-model-info { font-size:11px; color:var(--text3); text-align:center; margin-top:4px; }
+#drive-reconnect-bar { display:none; position:fixed; top:0; left:0; right:0; z-index:10000;
+  align-items:center; justify-content:center; gap:12px; flex-wrap:wrap;
+  padding:9px 14px; background:#7a1f1f; color:#fff; font-size:13px;
+  box-shadow:0 2px 10px rgba(0,0,0,.4); }
+#drive-reconnect-bar button { background:#fff; color:#7a1f1f; border:none; border-radius:6px;
+  padding:5px 12px; font-size:13px; font-weight:600; cursor:pointer; font-family:inherit; }
+.cc-size-btns { display:inline-flex; gap:4px; margin-left:8px; }
+.cc-size-btns button { background:rgba(255,255,255,.12); color:var(--text2); border:none;
+  border-radius:5px; width:24px; height:22px; font-size:13px; cursor:pointer; line-height:1; }
+.cc-size-btns button:active { background:rgba(255,255,255,.25); }
 </style>
 </head>
 <body>
@@ -208,6 +223,10 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
   <div id="loading-progress" class="hidden"><div id="loading-bar"></div></div>
 </div>
 <div id="toast"></div>
+<div id="drive-reconnect-bar">
+  <span>⚠️ การเชื่อมต่อ Google Drive หลุด</span>
+  <button id="reconnect-btn" onclick="tapReconnect()">เชื่อมต่อ Drive ใหม่</button>
+</div>
 
 <!-- Folder Modal -->
 <div id="folder-modal" class="modal-bg hidden">
@@ -424,6 +443,10 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
           <div class="cc-head">
             <div class="cc-label"><div class="cc-dot"></div> คำบรรยาย AI (ภาษาไทย)</div>
             <span class="cc-status-txt" id="cc-status">—</span>
+            <span class="cc-size-btns">
+              <button onclick="ccFontSize(-1)" title="ตัวอักษรเล็กลง">A−</button>
+              <button onclick="ccFontSize(1)" title="ตัวอักษรใหญ่ขึ้น">A+</button>
+            </span>
           </div>
           <div class="cc-text" id="cc-text">กำลังประมวลผล...</div>
           <div class="cc-model-info" id="cc-model-info"></div>
@@ -465,7 +488,7 @@ const S = {
   folderStack: [], seeking: false,
   allFolders: [], allAudios: [],
   // CC
-  ccOn: false, ccAudioCtx: null, ccSource: null, ccRecorder: null,
+  ccOn: false, ccAudioCtx: null, ccSource: null, ccGain: null, ccRecorder: null,
   ccTranscriber: null, ccLoading: false, ccChunks: [],
   activeTab: 'github',
 };
@@ -594,6 +617,7 @@ async function handleToken(resp) {
   S.tokenExp = Date.now() + (resp.expires_in * 1000) - 60000;
   localStorage.setItem('ab_tok', S.token);
   localStorage.setItem('ab_tokexp', S.tokenExp.toString());
+  hideReconnectBar();
   try {
     const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: `Bearer ${S.token}` } });
     S.user = await r.json();
@@ -628,7 +652,7 @@ async function ensureToken() {
     waited += 200;
   }
   if (!S.tokenClient) {
-    hideLoad(); toast('กรุณา Sign in ใหม่'); showScreen('auth-screen');
+    hideLoad(); showReconnectBar();
     throw new Error('no token client');
   }
   // FIX: on iOS Safari the silent refresh callback can NEVER fire (ITP blocks
@@ -640,23 +664,52 @@ async function ensureToken() {
     const to = setTimeout(() => {
       if (settled) return; settled = true; done();
       hideLoad();
-      toast('รีเฟรช token ไม่สำเร็จ — กรุณา Sign in ใหม่', 4000);
-      showScreen('auth-screen');
+      // Don't log the user out — show a one-tap reconnect bar instead.
+      showReconnectBar();
       rej(new Error('token refresh timeout'));
     }, 8000);
     S.tokenClient.callback = r => {
       if (settled) return; settled = true; clearTimeout(to); done();
       orig && orig(r);
-      if (r && r.error) { hideLoad(); showScreen('auth-screen'); rej(new Error(r.error)); }
-      else res();
+      if (r && r.error) { hideLoad(); showReconnectBar(); rej(new Error(r.error)); }
+      else { hideReconnectBar(); res(); }
     };
     try {
       S.tokenClient.requestAccessToken({ prompt: '' });
     } catch(e) {
       if (settled) return; settled = true; clearTimeout(to); done();
-      hideLoad(); rej(e);
+      hideLoad(); showReconnectBar(); rej(e);
     }
   });
+}
+
+// ── Drive reconnect bar (shown when silent refresh fails, e.g. iOS ITP) ──
+function showReconnectBar() {
+  const bar = document.getElementById('drive-reconnect-bar');
+  if (bar) bar.style.display = 'flex';
+}
+function hideReconnectBar() {
+  const bar = document.getElementById('drive-reconnect-bar');
+  if (bar) bar.style.display = 'none';
+}
+async function tapReconnect() {
+  const btn = document.getElementById('reconnect-btn');
+  if (btn) btn.textContent = 'กำลังเชื่อมต่อ...';
+  try {
+    await new Promise((res) => {
+      const orig = S.tokenClient.callback;
+      S.tokenClient.callback = r => { S.tokenClient.callback = orig; orig && orig(r); res(); };
+      S.tokenClient.requestAccessToken({ prompt: '' });
+    });
+  } catch(e) {}
+  if (btn) btn.textContent = 'เชื่อมต่อ Drive ใหม่';
+  if (Date.now() < S.tokenExp && S.token) {
+    hideReconnectBar();
+    toast('☁️ เชื่อมต่อ Drive อีกครั้งแล้ว');
+  } else {
+    // Silent failed → fall back to interactive sign-in (needs user gesture; we have one)
+    try { S.tokenClient.requestAccessToken(); } catch(e) {}
+  }
 }
 
 // ════════ DRIVE API ════════
@@ -1072,8 +1125,8 @@ function updateMediaSession() {
     artist: S.book?.name || '',
     album: 'AudioBook'
   });
-  navigator.mediaSession.setActionHandler('play', () => audio.play().catch(() => {}));
-  navigator.mediaSession.setActionHandler('pause', () => audio.pause());
+  navigator.mediaSession.setActionHandler('play', () => { ccPlayFade(); audio.play().catch(() => {}); });
+  navigator.mediaSession.setActionHandler('pause', () => pauseWithFade());
   navigator.mediaSession.setActionHandler('previoustrack', prevChapter);
   navigator.mediaSession.setActionHandler('nexttrack', nextChapter);
   try { navigator.mediaSession.setActionHandler('seekbackward', () => seekRel(-15)); } catch(e) {}
@@ -1111,14 +1164,8 @@ async function playChapter(idx, autoPlay=true) {
     const saved = S.progress[ch.id] || 0;
     if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
     if (S.ccOn && S.ccAudioCtx) {
-      // Re-ensure source is connected to destination after src change
-      audio.addEventListener('canplay', () => {
-        if (S.ccSource) {
-          try { S.ccSource.connect(S.ccAudioCtx.destination); } catch(e) {}
-        } else {
-          setupCCAudioSource();
-        }
-      }, { once: true });
+      // Re-ensure the source→gain→speakers graph after src change
+      audio.addEventListener('canplay', () => { setupCCAudioSource(); }, { once: true });
     }
     if (autoPlay) {
       audio.play().catch(e => {
@@ -1140,13 +1187,17 @@ function togglePlay() {
   if (S.idx < 0) { if (S.chapters.length) playChapter(0); return; }
   if (audio.paused) {
     audio.playbackRate = S.speed; // ensure rate is correct before play
+    ccPlayFade();                 // ramp CC graph back up (no-op if CC off)
     audio.play().catch(() => {});
   } else {
-    // iOS Safari bug: pausing at non-1.0 rate drains buffer → "record scratch" sound
-    // Fix: reset to 1.0 first, then pause immediately
-    audio.playbackRate = 1.0;
-    audio.pause();
+    pauseWithFade();
   }
+}
+// Pause with a quick fade to kill the iOS "record scratch" when CC routes
+// audio through Web Audio. Also resets rate to 1.0 first (separate iOS fix).
+function pauseWithFade() {
+  audio.playbackRate = 1.0;
+  ccPauseFade(() => audio.pause());
 }
 function prevChapter() { if (audio.currentTime>5) { audio.currentTime=0; return; } if (S.idx>0) playChapter(S.idx-1); }
 function nextChapter() { if (S.idx<S.chapters.length-1) playChapter(S.idx+1); else toast('จบเล่มแล้ว! 🎉'); }
@@ -1195,6 +1246,7 @@ audio.addEventListener('loadedmetadata', () => {
 });
 audio.addEventListener('play',  () => {
   document.getElementById('play-btn').textContent='⏸';
+  ccPlayFade(); // restore CC graph volume (no-op if CC off)
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
   // Prefetch next chapter after 8 seconds of playback
   if (S.idx >= 0 && S.idx < S.chapters.length - 1) {
@@ -1356,9 +1408,10 @@ async function loadWhisperModel() {
     toast('เบราว์เซอร์นี้ไม่รองรับ CC', 5000);
     return;
   }
-  // On iPad/iPhone, warn that on-device Whisper is slow
+  // On iPad/iPhone, warn that on-device Whisper is slow AND that turning CC on
+  // routes audio through Web Audio, which stops iOS background/locked playback.
   if (_isIOS) {
-    toast('CC บน iPad จะช้ากว่าบนคอม — โปรดรอสักครู่', 4000);
+    toast('⚠️ บน iPad/iPhone: เปิด CC แล้วจะเล่นพื้นหลัง/ล็อกจอไม่ได้ และ CC จะช้า', 6000);
   }
 
   S.ccLoading = true;
@@ -1440,18 +1493,53 @@ function setupCCAudioSource() {
     if (!S.ccAudioCtx) return false; // Should already be created by startCC()
     if (S.ccAudioCtx.state === 'suspended') S.ccAudioCtx.resume();
 
-    // Create source from audio element
+    // Create source from audio element (permanent — created once)
     if (!S.ccSource) {
       S.ccSource = S.ccAudioCtx.createMediaElementSource(audio);
     }
-    // Always connect to destination (speakers/headphones) so we can still hear
-    S.ccSource.connect(S.ccAudioCtx.destination);
+    // Insert a gain node so we can fade out before pausing. On iOS, pausing a
+    // media element that feeds a Web Audio graph causes a "record scratch"
+    // click; a fast gain ramp to 0 first removes it.
+    if (!S.ccGain) {
+      S.ccGain = S.ccAudioCtx.createGain();
+      S.ccGain.gain.value = 1.0;
+    }
+    // source → gain → speakers (connect() is idempotent for identical edges)
+    S.ccSource.connect(S.ccGain);
+    S.ccGain.connect(S.ccAudioCtx.destination);
     return true;
   } catch(e) {
     // CORS or other error
     document.getElementById('cc-text').textContent = 'ไม่สามารถดักสัญญาณเสียงได้: ' + e.message;
     toast('CC ไม่รองรับ — ลองรีโหลดหน้าเว็บ', 4000);
     return false;
+  }
+}
+
+// Fade the CC audio graph down, then run cb() (the actual pause). No-op when
+// CC graph isn't active.
+function ccPauseFade(cb) {
+  if (S.ccGain && S.ccAudioCtx) {
+    const now = S.ccAudioCtx.currentTime;
+    try {
+      S.ccGain.gain.cancelScheduledValues(now);
+      S.ccGain.gain.setValueAtTime(Math.max(0.0001, S.ccGain.gain.value), now);
+      S.ccGain.gain.linearRampToValueAtTime(0.0001, now + 0.06);
+    } catch(e) {}
+    setTimeout(cb, 70);
+  } else {
+    cb();
+  }
+}
+// Ramp the CC audio graph back up to full (called whenever playback starts).
+function ccPlayFade() {
+  if (S.ccGain && S.ccAudioCtx) {
+    const now = S.ccAudioCtx.currentTime;
+    try {
+      S.ccGain.gain.cancelScheduledValues(now);
+      S.ccGain.gain.setValueAtTime(Math.max(0.0001, S.ccGain.gain.value), now);
+      S.ccGain.gain.linearRampToValueAtTime(1.0, now + 0.05);
+    } catch(e) {}
   }
 }
 
@@ -1683,8 +1771,30 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.5 (2026-06-24) — CC anti-repeat, play-btn state fix, iPad CC enabled
-document.getElementById('app-version').textContent = 'v2.5 (2026-06-24)';
+// AudioBook v2.6 (2026-06-25) — caption sizing, speed-display sync,
+//   Drive reconnect bar, CC pause-fade, fixed-bottom captions
+document.getElementById('app-version').textContent = 'v2.6 (2026-06-25)';
+
+// ── Caption font size (persisted) ──
+function applyCCFontSize() {
+  const px = parseInt(localStorage.getItem('ab_cc_fs') || '16');
+  const el = document.getElementById('cc-text');
+  if (el) el.style.fontSize = px + 'px';
+}
+function ccFontSize(dir) {
+  let px = parseInt(localStorage.getItem('ab_cc_fs') || '16');
+  px = Math.max(12, Math.min(34, px + dir * 2));
+  localStorage.setItem('ab_cc_fs', px);
+  applyCCFontSize();
+}
+applyCCFontSize();
+
+// ── Fix: speed input showed hardcoded 1.00 after reload even when the real
+//   playbackRate was the saved value. Sync the display to S.speed on boot. ──
+(function syncSpeedDisplay() {
+  const inp = document.getElementById('speed-input');
+  if (inp) inp.value = S.speed.toFixed(2);
+})();
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
