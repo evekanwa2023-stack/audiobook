@@ -1297,8 +1297,11 @@ async function startCC() {
   startCCRecording();
 }
 
+// iPad Pro รายงาน UA เป็น Macintosh แต่มี maxTouchPoints=5
+// แยก Mac (trackpad = pointer:fine) กับ iPad (touch = pointer:coarse) ด้วย matchMedia
 const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
-  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1 &&
+   !window.matchMedia('(pointer:fine)').matches);
 // CC ใช้ได้เฉพาะ Desktop (iOS ไม่รองรับ) — เราใช้ numThreads=1 แทน SharedArrayBuffer
 const _ccSupported = !_isIOS;
 
