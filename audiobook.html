@@ -254,29 +254,30 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
   </div>
 </div>
 
-<!-- HF API Key Modal -->
-<div id="hf-key-modal" class="modal-bg hidden">
+<!-- CC Settings Modal -->
+<div id="cc-settings-modal" class="modal-bg hidden">
   <div class="modal-box" style="max-width:460px;">
     <div class="modal-header">
-      <h3>⚙ ตั้งค่า HF API Key (คำบรรยายไทย)</h3>
-      <button class="btn btn-ghost btn-xs" onclick="closeHFModal()">✕</button>
+      <h3>⚙ ตั้งค่าคำบรรยายไทย (CC)</h3>
+      <button class="btn btn-ghost btn-xs" onclick="closeCCSettings()">✕</button>
     </div>
     <div class="modal-body" style="padding:16px 18px;">
       <p style="font-size:12px;color:var(--text2);line-height:1.7;margin-bottom:14px;">
-        คำบรรยายไทยใช้โมเดล <strong style="color:var(--acch);">whisper-large-v3-turbo</strong> ผ่าน Hugging Face<br>
-        1) ไปที่ <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a> (สมัครฟรี ไม่ต้องใช้บัตร)<br>
-        2) New token → ประเภท <strong>Read</strong> → Create<br>
-        3) คัดลอกโทเคน (ขึ้นต้น <code>hf_</code>) มาวางด้านล่าง
+        ถอดเสียงด้วย Whisper AI <strong style="color:var(--acch);">ในเครื่องคุณเอง</strong> — ฟรี 100% ไม่ต้องสมัคร ไม่ต้องใช้ API<br>
+        ถอดทั้งบทครั้งเดียว แล้วเก็บ cache ไว้ (ครั้งต่อไปขึ้นทันที)
       </p>
       <div class="input-row">
-        <label>HF API Token</label>
-        <input type="password" id="hf-key-input" placeholder="hf_xxxxxxxxxxxxxxxxxxxx" autocomplete="off" />
+        <label>โมเดล (ใหญ่ขึ้น = ไทยแม่นขึ้น แต่ช้าลง/โหลดใหญ่ขึ้น)</label>
+        <select id="cc-model-select" style="width:100%;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:9px 12px;color:var(--text);font-size:13px;outline:none;">
+          <option value="Xenova/whisper-tiny">Tiny — เร็วสุด · ไทยหยาบ (~39MB)</option>
+          <option value="Xenova/whisper-base">Base — สมดุล (~74MB)</option>
+          <option value="Xenova/whisper-small">Small — ไทยดีสุด · ช้า (~244MB)</option>
+        </select>
       </div>
-      <div class="info-box">💾 บันทึกในเครื่องนี้เท่านั้น (localStorage) · ถอดเสียงครั้งเดียวต่อบท แล้ว cache ไว้</div>
+      <div class="info-box">⚠️ บน iPad/iPhone โมเดล Small จะช้ามาก (ถอดทีละ 30 วิ) — ปล่อยให้ถอดจนจบครั้งเดียว ครั้งหน้าจะขึ้นทันทีจาก cache · ถ้าปิดกลางคันจะถอดต่อจากเดิมได้</div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-ghost btn-sm" onclick="clearHFKey()">ลบ key</button>
-      <button class="btn btn-primary btn-sm" onclick="saveHFKey()">บันทึก</button>
+      <button class="btn btn-primary btn-sm" onclick="saveCCSettings()">บันทึก</button>
     </div>
   </div>
 </div>
@@ -461,9 +462,9 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
               <button class="btn btn-xs" id="cc-btn"
                 style="background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.25);"
                 onclick="toggleCC()">🔤 CC ไทย</button>
-              <button class="btn btn-xs" id="cc-settings-btn" title="ตั้งค่า HF API Key"
+              <button class="btn btn-xs" id="cc-settings-btn" title="ตั้งค่าคำบรรยาย (CC)"
                 style="background:transparent;color:var(--text2);border:1px solid var(--border);"
-                onclick="openHFModal()">⚙</button>
+                onclick="openCCSettings()">⚙</button>
             </div>
           </div>
         </div>
@@ -517,8 +518,9 @@ const S = {
   speed: parseFloat(localStorage.getItem('ab_speed') || '1'),
   folderStack: [], seeking: false,
   allFolders: [], allAudios: [],
-  // CC (HuggingFace Inference API transcription)
+  // CC (on-device Whisper transcription — free / offline)
   ccOn: false, ccSegments: [], ccTranscribing: false, ccGen: 0, _ccLastSeg: null,
+  ccTranscriber: null, ccModelLoaded: null,
   activeTab: 'github',
 };
 
@@ -847,18 +849,18 @@ async function _ccGet(id) {
     if (!db.objectStoreNames.contains('cc_transcripts')) return null;
     return await new Promise(res => {
       const r = db.transaction('cc_transcripts').objectStore('cc_transcripts').get(id);
-      r.onsuccess = () => res(r.result ? r.result.segments : null);
+      r.onsuccess = () => res(r.result || null);
       r.onerror = () => res(null);
     });
   } catch(e) { return null; }
 }
-async function _ccPut(id, segments) {
+async function _ccPut(id, rec) {
   try {
     const db = await _openDB();
     if (!db.objectStoreNames.contains('cc_transcripts')) return false;
     return await new Promise(res => {
       const tx = db.transaction('cc_transcripts','readwrite');
-      tx.objectStore('cc_transcripts').put({ id, segments, t: Date.now() });
+      tx.objectStore('cc_transcripts').put(Object.assign({ id, t: Date.now() }, rec));
       tx.oncomplete = () => res(true); tx.onerror = () => res(false);
     });
   } catch(e) { return false; }
@@ -1403,25 +1405,25 @@ function saveBmNote(id, val) {
 }
 
 // ════════════════════════════════════════════════════════════
-//  CC — Thai captions via the HuggingFace Inference API
-//  Transcribe the whole chapter once (whisper-large-v3-turbo),
-//  cache timestamped segments in IndexedDB, then sync to currentTime.
+//  CC — Thai captions via on-device Whisper (transformers.js)
+//  100% free / offline after the model downloads. Transcribe the
+//  whole chapter once (30s windows, with timestamps), cache the
+//  segments in IndexedDB, then sync them to audio.currentTime.
 // ════════════════════════════════════════════════════════════
 async function toggleCC() {
   if (S.ccOn) { stopCC(); return; }
   await startCC();
 }
 
-// ── HuggingFace Inference API config ──
-const HF_MODEL = 'openai/whisper-large-v3-turbo';
-// NOTE: the old api-inference.huggingface.co host is deprecated — use the router.
-const HF_ENDPOINT = 'https://router.huggingface.co/hf-inference/models/' + HF_MODEL;
-// 3-minute WAV chunks keep each base64 JSON payload well under HF's request-size
-// limit (a 5-min chunk ≈ 13MB base64 can be rejected). Raise if your plan allows.
-const CC_CHUNK_SEC = 180;
-const _ccSleep = (ms) => new Promise(r => setTimeout(r, ms));
+// ── On-device Whisper config ──
+// Bigger model = better Thai but slower / larger download. User-selectable (⚙).
+const CC_DEFAULT_MODEL = 'Xenova/whisper-base';
+// 30-second slices: Whisper's native window. Short slices keep the UI from
+// freezing too long per step (inference runs on the main thread on GitHub
+// Pages — no SharedArrayBuffer there) and let captions appear progressively.
+const CC_CHUNK_SEC = 30;
 
-function getHFKey() { return (localStorage.getItem('ab_hf_key') || '').trim(); }
+function getCCModel() { return localStorage.getItem('ab_cc_model') || CC_DEFAULT_MODEL; }
 function setCCStatus(t) { const e = document.getElementById('cc-status'); if (e) e.textContent = t; }
 function setCCBtnActive(on) {
   const b = document.getElementById('cc-btn'); if (!b) return;
@@ -1429,26 +1431,22 @@ function setCCBtnActive(on) {
   b.style.background = on ? 'rgba(52,211,153,.3)' : 'rgba(52,211,153,.12)';
 }
 
-// ── HF API key settings modal (⚙) ──
-function openHFModal() {
-  const inp = document.getElementById('hf-key-input');
-  if (inp) inp.value = getHFKey();
-  document.getElementById('hf-key-modal').classList.remove('hidden');
+// ── CC settings modal (⚙) — pick the on-device model ──
+function openCCSettings() {
+  const sel = document.getElementById('cc-model-select');
+  if (sel) sel.value = getCCModel();
+  document.getElementById('cc-settings-modal').classList.remove('hidden');
 }
-function closeHFModal() { document.getElementById('hf-key-modal').classList.add('hidden'); }
-function saveHFKey() {
-  const v = (document.getElementById('hf-key-input').value || '').trim();
-  if (!v) { toast('กรุณาใส่ HF API Key'); return; }
-  if (!v.startsWith('hf_')) toast('โทเคนมักขึ้นต้นด้วย hf_ — ตรวจสอบอีกครั้ง', 3500);
-  localStorage.setItem('ab_hf_key', v);
-  closeHFModal();
-  toast('บันทึก HF API Key แล้ว ✓');
-  if (S.ccOn) startCC(); // already toggled on → start now that we have a key
-}
-function clearHFKey() {
-  localStorage.removeItem('ab_hf_key');
-  const inp = document.getElementById('hf-key-input'); if (inp) inp.value = '';
-  toast('ลบ HF API Key แล้ว');
+function closeCCSettings() { document.getElementById('cc-settings-modal').classList.add('hidden'); }
+function saveCCSettings() {
+  const sel = document.getElementById('cc-model-select');
+  const m = sel ? sel.value : CC_DEFAULT_MODEL;
+  const prev = getCCModel();
+  localStorage.setItem('ab_cc_model', m);
+  closeCCSettings();
+  toast('โมเดล: ' + m.split('/').pop());
+  if (m !== prev) { S.ccTranscriber = null; S.ccModelLoaded = null; } // force reload + re-transcribe
+  if (S.ccOn) startCC();
 }
 
 // ── Turn captions on for the current chapter ──
@@ -1466,37 +1464,38 @@ async function startCC() {
   const myGen = S.ccGen;
   const isActive = () => S.ccOn && myGen === S.ccGen;
 
-  if (!getHFKey()) {
-    document.getElementById('cc-text').textContent = 'กรุณาตั้งค่า HF API Key ที่ปุ่ม ⚙';
-    document.getElementById('cc-model-info').textContent =
-      'รับโทเคนฟรี (ไม่ต้องใช้บัตร) ที่ huggingface.co/settings/tokens';
-    setCCStatus('ยังไม่ได้ตั้งค่า key');
-    return;
-  }
-
   const ch = S.chapters[S.idx];
+  const ckey = ch.id + '::' + getCCModel(); // cache per chapter + model
 
-  // 1) Use the cached transcript if we already have one for this chapter.
+  // 1) Cache lookup.
   setCCStatus('ตรวจสอบ cache...');
   document.getElementById('cc-text').textContent = 'กำลังเตรียมคำบรรยาย...';
-  const cached = await _ccGet(ch.id);
+  const rec = await _ccGet(ckey);
   if (!isActive()) return;
-  if (cached && cached.length) {
-    S.ccSegments = cached;
-    document.getElementById('cc-model-info').textContent = `พร้อมแล้ว · ${cached.length} ช่วง (จาก cache)`;
-    setCCStatus('✓ พร้อม');
-    document.getElementById('cc-text').textContent = '♪';
+
+  let resumeFrom = 0;
+  if (rec && rec.segments && rec.segments.length) {
+    S.ccSegments = rec.segments;
+    if (rec.done) {
+      document.getElementById('cc-model-info').textContent = `พร้อมแล้ว · ${rec.segments.length} ช่วง (จาก cache)`;
+      setCCStatus('✓ พร้อม');
+      document.getElementById('cc-text').textContent = '♪';
+      updateCCCaption(audio.currentTime);
+      return;
+    }
+    // Partial transcript → show what we have and resume the rest.
+    resumeFrom = rec.doneChunks || 0;
     updateCCCaption(audio.currentTime);
-    return;
+  } else {
+    S.ccSegments = [];
   }
 
-  // 2) Otherwise transcribe the whole chapter via HuggingFace, then cache it.
+  // 2) Transcribe (or resume) the chapter on-device, then cache it.
   S.ccTranscribing = true;
-  S.ccSegments = [];
   try {
     document.getElementById('cc-model-info').textContent =
-      'whisper-large-v3-turbo · ถอดเสียงครั้งแรกของบทนี้ (อาจใช้เวลาสักครู่)';
-    const segs = await transcribeChapterHF(ch, isActive);
+      getCCModel().split('/').pop() + ' · ถอดเสียงในเครื่อง (ครั้งแรกของบทนี้ จะช้าหน่อย)';
+    const segs = await transcribeChapterLocal(ch, isActive, ckey, resumeFrom);
     if (!isActive()) return;
     if (!segs || !segs.length) {
       document.getElementById('cc-text').textContent = 'ไม่พบคำพูดในไฟล์เสียงนี้';
@@ -1504,16 +1503,15 @@ async function startCC() {
       return;
     }
     S.ccSegments = segs;
-    _ccPut(ch.id, segs);
+    _ccPut(ckey, { segments: segs, done: true, doneChunks: 0, totalChunks: 0 });
     document.getElementById('cc-model-info').textContent = `พร้อมแล้ว · ${segs.length} ช่วง`;
     setCCStatus('✓ พร้อม');
-    document.getElementById('cc-text').textContent = '♪';
     updateCCCaption(audio.currentTime);
   } catch (e) {
     if (!isActive()) return;
     console.error('[CC] transcribe error:', e);
     document.getElementById('cc-text').textContent = '⚠️ ' + (e.message || 'ถอดเสียงล้มเหลว');
-    document.getElementById('cc-model-info').textContent = 'แตะปุ่ม ⚙ เพื่อตรวจสอบ API Key แล้วลองใหม่';
+    document.getElementById('cc-model-info').textContent = 'ลองกด CC อีกครั้ง หรือเลือกโมเดลเล็กลงที่ปุ่ม ⚙';
     setCCStatus('ผิดพลาด');
   } finally {
     if (myGen === S.ccGen) S.ccTranscribing = false;
@@ -1537,12 +1535,59 @@ async function getChapterBlobForCC(fileId) {
   return blob;
 }
 
-// Decode → split into CC_CHUNK_SEC WAV chunks → POST each to HF → merge with a
-// per-chunk time offset. Returns [{start,end,text}] sorted by start (seconds).
-async function transcribeChapterHF(ch, isActive) {
-  setCCStatus('กำลังโหลดไฟล์เสียง...');
+// Load the transformers.js Whisper pipeline (cached across chapters). Uses the
+// proven main-thread WASM config (proxy=false, single thread) so it works on
+// GitHub Pages without cross-origin isolation.
+async function loadCCModel(isActive) {
+  const model = getCCModel();
+  if (S.ccTranscriber && S.ccModelLoaded === model) return S.ccTranscriber;
+  S.ccTranscriber = null; S.ccModelLoaded = null;
+
+  setCCStatus('โหลดโมเดล...');
+  document.getElementById('cc-text').textContent = 'กำลังโหลดโมเดล Whisper (ครั้งแรกครั้งเดียว)...';
+  showLoad('กำลังโหลดโมเดล Whisper AI...', true);
+  setLoadProgress(5);
+  try {
+    const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+    env.allowLocalModels = false;
+    env.allowRemoteModels = true;
+    try { env.backends.onnx.wasm.proxy = false; } catch (e) {}
+    try { env.backends.onnx.wasm.numThreads = 1; } catch (e) {}
+    setLoadProgress(12);
+    const tr = await pipeline('automatic-speech-recognition', model, {
+      progress_callback: (p) => {
+        const pct = typeof p.progress === 'number' ? p.progress : 0;
+        if (pct > 0) {
+          setLoadProgress(Math.min(96, 12 + pct * 0.8));
+          const fn = p.file ? p.file.split('/').pop() : '';
+          document.getElementById('cc-text').textContent = `โหลดโมเดล ${fn}: ${Math.round(pct)}%`;
+        }
+      },
+    });
+    setLoadProgress(100);
+    hideLoad();
+    if (isActive && !isActive()) return null;
+    S.ccTranscriber = tr;
+    S.ccModelLoaded = model;
+    return tr;
+  } catch (e) {
+    hideLoad();
+    throw new Error('โหลดโมเดลไม่สำเร็จ: ' + (e && e.message ? e.message : e));
+  }
+}
+
+// Decode → 16kHz mono PCM → transcribe in CC_CHUNK_SEC slices on-device,
+// merging each slice's timestamps with its offset. Saves partial progress each
+// slice (so it can resume) and updates captions live. Returns [{start,end,text}].
+async function transcribeChapterLocal(ch, isActive, ckey, startChunk) {
+  startChunk = startChunk || 0;
+
+  setCCStatus('โหลดไฟล์เสียง...');
   const blob = await getChapterBlobForCC(ch.id);
   if (!isActive()) return null;
+
+  const tr = await loadCCModel(isActive);
+  if (!tr || !isActive()) return null;
 
   setCCStatus('ถอดรหัสเสียง...');
   const pcm = await decodeBlobToPCM16k(blob); // Float32Array @ 16kHz mono
@@ -1552,119 +1597,49 @@ async function transcribeChapterHF(ch, isActive) {
   const SR = 16000;
   const chunkSamples = CC_CHUNK_SEC * SR;
   const nChunks = Math.max(1, Math.ceil(pcm.length / chunkSamples));
-  const segments = [];
+  if (startChunk >= nChunks) return S.ccSegments;
 
-  for (let c = 0; c < nChunks; c++) {
+  for (let c = startChunk; c < nChunks; c++) {
     if (!isActive()) return null;
     const startSample = c * chunkSamples;
     const slice = pcm.subarray(startSample, Math.min(pcm.length, startSample + chunkSamples));
     const offsetSec = startSample / SR;
 
-    setCCStatus(`ถอดเสียง ${c + 1}/${nChunks}...`);
-    document.getElementById('cc-text').textContent = `กำลังถอดเสียงทั้งบท... (${c + 1}/${nChunks})`;
+    setCCStatus(`ถอดเสียง ${c + 1}/${nChunks}…`);
+    if (!S.ccSegments.length) document.getElementById('cc-text').textContent = `กำลังถอดเสียง… (${c + 1}/${nChunks})`;
 
-    const b64 = bytesToBase64(encodeWAV(slice, SR));
-    const rawChunks = await hfTranscribeChunk(b64, isActive);
+    let out = null;
+    try {
+      out = await tr(slice, {
+        language: 'thai', task: 'transcribe',
+        return_timestamps: true, chunk_length_s: 30, stride_length_s: 5,
+        no_repeat_ngram_size: 3, repetition_penalty: 1.3,
+      });
+    } catch (e) { console.error('[CC] chunk', c, e); }
     if (!isActive()) return null;
 
-    for (const seg of (rawChunks || [])) {
+    const parts = (out && Array.isArray(out.chunks) && out.chunks.length)
+      ? out.chunks
+      : (out && out.text ? [{ text: out.text, timestamp: [0, slice.length / SR] }] : []);
+    for (const seg of parts) {
       const ts = Array.isArray(seg.timestamp) ? seg.timestamp : [];
       const a = (typeof ts[0] === 'number') ? ts[0] : 0;
       const b = (typeof ts[1] === 'number') ? ts[1] : a + 4;
       const text = cleanCCText((seg.text || '').trim());
-      if (text) segments.push({ start: a + offsetSec, end: b + offsetSec, text });
+      if (text && text !== '[BLANK_AUDIO]') S.ccSegments.push({ start: a + offsetSec, end: b + offsetSec, text });
     }
+    S.ccSegments.sort((x, y) => x.start - y.start);
+    updateCCCaption(audio.currentTime);
+    document.getElementById('cc-model-info').textContent = `ถอดเสียง ${c + 1}/${nChunks} · ${S.ccSegments.length} บรรทัด`;
+    _ccPut(ckey, { segments: S.ccSegments, done: false, doneChunks: c + 1, totalChunks: nChunks });
   }
 
-  segments.sort((x, y) => x.start - y.start);
-  // Clamp null/overlapping end times so captions switch cleanly.
-  for (let i = 0; i < segments.length - 1; i++) {
-    if (segments[i].end > segments[i + 1].start || segments[i].end <= segments[i].start) {
-      segments[i].end = Math.max(segments[i].start + 0.5, segments[i + 1].start);
-    }
+  const segs = S.ccSegments;
+  for (let i = 0; i < segs.length - 1; i++) {
+    if (segs[i].end > segs[i + 1].start || segs[i].end <= segs[i].start)
+      segs[i].end = Math.max(segs[i].start + 0.5, segs[i + 1].start);
   }
-  return segments;
-}
-
-// POST one base64 WAV chunk to the HF Inference API. Returns the model's `chunks`
-// array: [{text, timestamp:[start,end]}]. return_timestamps is required because
-// each chunk is > 30s (Whisper long-form generation). Language auto-detected.
-async function hfTranscribeChunk(b64, isActive) {
-  const key = getHFKey();
-  const body = JSON.stringify({
-    inputs: b64,
-    parameters: { return_timestamps: true }
-  });
-  let lastErr = '';
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (isActive && !isActive()) throw new Error('ยกเลิก');
-    let res;
-    try {
-      res = await fetch(HF_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + key,
-          'Content-Type': 'application/json',
-          'x-wait-for-model': 'true'
-        },
-        body
-      });
-    } catch (e) { lastErr = e.message; await _ccSleep(2500); continue; }
-
-    if (res.ok) {
-      let data;
-      try { data = await res.json(); } catch (e) { throw new Error('ตอบกลับไม่ถูกต้องจาก HF'); }
-      if (Array.isArray(data.chunks) && data.chunks.length) return data.chunks;
-      if (typeof data.text === 'string' && data.text.trim())
-        return [{ text: data.text, timestamp: [0, CC_CHUNK_SEC] }];
-      return [];
-    }
-
-    const txt = await res.text().catch(() => '');
-    if (res.status === 503) { setCCStatus('โมเดลกำลังโหลด... รอสักครู่'); lastErr = '503'; await _ccSleep(6000); continue; }
-    if (res.status === 401 || res.status === 403) throw new Error('API Key ไม่ถูกต้อง/ไม่มีสิทธิ์ Inference (แตะปุ่ม ⚙)');
-    if (res.status === 429) { setCCStatus('ถูกจำกัดอัตรา (429) รอสักครู่...'); lastErr = '429'; await _ccSleep(8000); continue; }
-    if (res.status === 404) throw new Error('ไม่พบโมเดลบน HF Inference (404)');
-    throw new Error('HF ' + res.status + ': ' + txt.slice(0, 140));
-  }
-  throw new Error('เชื่อมต่อ HF ไม่สำเร็จ: ' + lastErr);
-}
-
-// Encode a mono Float32 PCM buffer as a 16-bit WAV (Uint8Array).
-function encodeWAV(samples, sampleRate) {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-  const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
-  writeStr(0, 'RIFF');
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeStr(8, 'WAVE');
-  writeStr(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);              // PCM
-  view.setUint16(22, 1, true);              // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // byte rate
-  view.setUint16(32, 2, true);              // block align
-  view.setUint16(34, 16, true);             // bits per sample
-  writeStr(36, 'data');
-  view.setUint32(40, samples.length * 2, true);
-  let off = 44;
-  for (let i = 0; i < samples.length; i++) {
-    let v = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(off, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
-    off += 2;
-  }
-  return new Uint8Array(buffer);
-}
-
-// Base64-encode bytes in blocks (avoids call-stack overflow on big buffers).
-function bytesToBase64(bytes) {
-  let binary = '';
-  const step = 0x8000;
-  for (let i = 0; i < bytes.length; i += step) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-  }
-  return btoa(binary);
+  return segs;
 }
 
 // Show the caption segment matching the current playback time. Keeps the last
