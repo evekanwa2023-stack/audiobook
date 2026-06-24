@@ -627,11 +627,35 @@ async function ensureToken() {
     await new Promise(r => setTimeout(r, 200));
     waited += 200;
   }
-  if (!S.tokenClient) { toast('กรุณา Sign in ใหม่'); showScreen('auth-screen'); return; }
-  await new Promise(res => {
+  if (!S.tokenClient) {
+    hideLoad(); toast('กรุณา Sign in ใหม่'); showScreen('auth-screen');
+    throw new Error('no token client');
+  }
+  // FIX: on iOS Safari the silent refresh callback can NEVER fire (ITP blocks
+  // it), which used to hang the app forever on the loading screen. Time it out.
+  await new Promise((res, rej) => {
+    let settled = false;
     const orig = S.tokenClient.callback;
-    S.tokenClient.callback = r => { orig && orig(r); res(); };
-    S.tokenClient.requestAccessToken({ prompt: '' });
+    const done = () => { S.tokenClient.callback = orig; };
+    const to = setTimeout(() => {
+      if (settled) return; settled = true; done();
+      hideLoad();
+      toast('รีเฟรช token ไม่สำเร็จ — กรุณา Sign in ใหม่', 4000);
+      showScreen('auth-screen');
+      rej(new Error('token refresh timeout'));
+    }, 8000);
+    S.tokenClient.callback = r => {
+      if (settled) return; settled = true; clearTimeout(to); done();
+      orig && orig(r);
+      if (r && r.error) { hideLoad(); showScreen('auth-screen'); rej(new Error(r.error)); }
+      else res();
+    };
+    try {
+      S.tokenClient.requestAccessToken({ prompt: '' });
+    } catch(e) {
+      if (settled) return; settled = true; clearTimeout(to); done();
+      hideLoad(); rej(e);
+    }
   });
 }
 
@@ -675,15 +699,23 @@ async function listAudioFiles(fid) {
 const _DB_NAME = 'ab_audio_v1', _DB_STORE = 'blobs', _CACHE_MAX_MB = 400;
 function _openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open(_DB_NAME, 1);
+    let settled = false;
+    const finish = (fn, arg) => { if (settled) return; settled = true; fn(arg); };
+    // FIX: on iOS Safari indexedDB.open() can hang and never fire any event,
+    // which froze the player on the loading screen. Time it out → cache miss.
+    const to = setTimeout(() => finish(rej, new Error('indexedDB open timeout')), 3000);
+    let r;
+    try { r = indexedDB.open(_DB_NAME, 1); }
+    catch(e) { clearTimeout(to); finish(rej, e); return; }
     r.onupgradeneeded = e => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains(_DB_STORE)) {
         db.createObjectStore(_DB_STORE, { keyPath: 'id' }).createIndex('t','t');
       }
     };
-    r.onsuccess = e => res(e.target.result);
-    r.onerror = () => rej(r.error);
+    r.onsuccess = e => { clearTimeout(to); finish(res, e.target.result); };
+    r.onerror = () => { clearTimeout(to); finish(rej, r.error); };
+    r.onblocked = () => { clearTimeout(to); finish(rej, new Error('indexedDB blocked')); };
   });
 }
 async function _dbGet(id) {
@@ -1065,12 +1097,11 @@ async function playChapter(idx, autoPlay=true) {
   // This marks the <audio> element as user-activated so play() works after async fetch
   if (autoPlay) iosUnlockAudio();
 
-  await ensureToken();
-
   // CC: MediaElementSource is permanently tied to the audio element (cannot recreate)
   // Just reconnect to destination on canplay — do NOT null S.ccSource
 
   try {
+    await ensureToken();
     const blobUrl = await getAudioBlobUrl(ch.id);
     hideLoad();
     audio.src = blobUrl;
@@ -1411,6 +1442,51 @@ function setupCCAudioSource() {
   }
 }
 
+// Decode a recorded (webm/opus/mp4) Blob into a 16kHz mono Float32Array,
+// which is the format Whisper / transformers.js expects.
+async function decodeBlobToPCM16k(blob) {
+  const arrayBuffer = await blob.arrayBuffer();
+  if (!arrayBuffer || arrayBuffer.byteLength === 0) return null;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const decodeCtx = new AC();
+  let decoded;
+  try {
+    // slice(0) → pass a copy; some browsers detach the original buffer
+    decoded = await decodeCtx.decodeAudioData(arrayBuffer.slice(0));
+  } finally {
+    if (decodeCtx.state !== 'closed') { try { decodeCtx.close(); } catch(e){} }
+  }
+  // Mix down to mono
+  let mono;
+  const nCh = decoded.numberOfChannels;
+  if (nCh > 1) {
+    mono = new Float32Array(decoded.length);
+    for (let c = 0; c < nCh; c++) {
+      const data = decoded.getChannelData(c);
+      for (let i = 0; i < data.length; i++) mono[i] += data[i] / nCh;
+    }
+  } else {
+    mono = Float32Array.from(decoded.getChannelData(0));
+  }
+  const targetRate = 16000;
+  if (decoded.sampleRate === targetRate) return mono;
+  return await resamplePCM(mono, decoded.sampleRate, targetRate);
+}
+
+async function resamplePCM(float32, fromRate, toRate) {
+  const frames = Math.max(1, Math.round(float32.length * toRate / fromRate));
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const offline = new OAC(1, frames, toRate);
+  const buf = offline.createBuffer(1, float32.length, fromRate);
+  buf.copyToChannel(float32, 0);
+  const src = offline.createBufferSource();
+  src.buffer = buf;
+  src.connect(offline.destination);
+  src.start();
+  const rendered = await offline.startRendering();
+  return Float32Array.from(rendered.getChannelData(0));
+}
+
 function startCCRecording() {
   if (!S.ccOn || !S.ccAudioCtx || !S.ccSource) return;
 
@@ -1442,22 +1518,30 @@ function startCCRecording() {
     document.getElementById('cc-status').textContent = 'กำลังประมวลผล...';
 
     try {
-      const arrayBuffer = await blob.arrayBuffer();
-      const result = await S.ccTranscriber(arrayBuffer, {
-        language: 'thai',
-        task: 'transcribe',
-        chunk_length_s: 30,
-        stride_length_s: 5,
-      });
-      const text = (result.text || '').trim();
-      if (text && text !== '[BLANK_AUDIO]') {
-        document.getElementById('cc-text').textContent = text;
-        document.getElementById('cc-status').textContent = '✓';
+      // ── FIX: Whisper (transformers.js) needs a 16kHz mono Float32Array.
+      // Passing the raw webm/opus ArrayBuffer made it read compressed bytes as
+      // PCM → garbage spectrogram → [BLANK_AUDIO]/empty. Decode it first.
+      const pcm = await decodeBlobToPCM16k(blob);
+      if (!pcm || pcm.length === 0) {
+        document.getElementById('cc-status').textContent = '— (ไม่มีเสียง)';
       } else {
-        document.getElementById('cc-status').textContent = '—';
+        const result = await S.ccTranscriber(pcm, {
+          language: 'thai',
+          task: 'transcribe',
+          chunk_length_s: 30,
+          stride_length_s: 5,
+        });
+        const text = (result.text || '').trim();
+        if (text && text !== '[BLANK_AUDIO]') {
+          document.getElementById('cc-text').textContent = text;
+          document.getElementById('cc-status').textContent = '✓';
+        } else {
+          document.getElementById('cc-status').textContent = '—';
+        }
       }
     } catch(e) {
-      document.getElementById('cc-status').textContent = 'ข้อผิดพลาด';
+      console.error('[CC] transcribe error:', e);
+      document.getElementById('cc-status').textContent = 'ข้อผิดพลาด: ' + (e?.message || '').slice(0, 40);
     }
 
     // Record next chunk if still playing
@@ -1572,8 +1656,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.3 (2026-06-24)
-document.getElementById('app-version').textContent = 'v2.3 (2026-06-24)';
+// AudioBook v2.4 (2026-06-24) — CC PCM-decode fix + iPad loading-hang fix
+document.getElementById('app-version').textContent = 'v2.4 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
