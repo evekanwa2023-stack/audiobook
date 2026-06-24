@@ -1088,7 +1088,9 @@ async function playChapter(idx, autoPlay=true) {
   const ch = S.chapters[idx];
   localStorage.setItem(`ab_lch_${S.book.id}`, idx);
   document.getElementById('np-chapter').textContent = stripExt(ch.name);
-  document.getElementById('play-btn').textContent = '⏸';
+  // Only show the "playing" icon when we will actually start playback.
+  // On refresh-restore (autoPlay=false) browsers block autoplay, so keep ▶.
+  document.getElementById('play-btn').textContent = autoPlay ? '⏸' : '▶';
   document.querySelectorAll('.ch-item').forEach((el,i) => el.classList.toggle('active', i===idx));
   const item = document.getElementById(`chi-${idx}`);
   if (item) item.scrollIntoView({ block:'nearest', behavior:'smooth' });
@@ -1299,10 +1301,12 @@ async function toggleCC() {
 async function startCC() {
   if (S.ccLoading) return;
 
-  // Create AudioContext within user gesture (required on iOS/Safari)
+  // Create AudioContext within user gesture (required on iOS/Safari).
+  // Don't force sampleRate:16000 — iOS Safari can throw/misbehave. The CC
+  // decoder resamples each chunk to 16kHz itself, so the capture rate is free.
   if (!S.ccAudioCtx) {
     try {
-      S.ccAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      S.ccAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     } catch(e) {
       toast('AudioContext ไม่รองรับ: ' + e.message, 4000);
       return;
@@ -1333,19 +1337,28 @@ async function startCC() {
 const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
   (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1 &&
    !window.matchMedia('(pointer:fine)').matches);
-// CC ใช้ได้เฉพาะ Desktop (iOS ไม่รองรับ) — เราใช้ numThreads=1 แทน SharedArrayBuffer
-const _ccSupported = !_isIOS;
+// CC requires MediaRecorder + Web Audio + WASM. Check capabilities instead of
+// blocking by OS — modern iPad Safari has all three, so let it try (single-
+// threaded WASM, no SharedArrayBuffer needed). It will just be slower.
+const _ccSupported = typeof MediaRecorder !== 'undefined' &&
+  !!(window.AudioContext || window.webkitAudioContext) &&
+  !!(window.OfflineAudioContext || window.webkitOfflineAudioContext) &&
+  typeof WebAssembly !== 'undefined';
 
 async function loadWhisperModel() {
-  // iOS ไม่รองรับ CC
+  // Browser lacks a required capability
   if (!_ccSupported) {
     hideLoad();
     S.ccLoading = false;
     S.ccTranscriber = null;
-    document.getElementById('cc-text').textContent = '⚠️ CC ใช้ได้เฉพาะ Chrome/Edge บน Windows/Mac';
-    document.getElementById('cc-model-info').textContent = 'iOS ไม่รองรับ Whisper AI';
-    toast('CC ใช้งานได้เฉพาะ Chrome บนคอมเท่านั้น', 5000);
+    document.getElementById('cc-text').textContent = '⚠️ เบราว์เซอร์นี้ไม่รองรับ CC';
+    document.getElementById('cc-model-info').textContent = 'ต้องใช้ MediaRecorder + Web Audio + WASM';
+    toast('เบราว์เซอร์นี้ไม่รองรับ CC', 5000);
     return;
+  }
+  // On iPad/iPhone, warn that on-device Whisper is slow
+  if (_isIOS) {
+    toast('CC บน iPad จะช้ากว่าบนคอม — โปรดรอสักครู่', 4000);
   }
 
   S.ccLoading = true;
@@ -1442,6 +1455,16 @@ function setupCCAudioSource() {
   }
 }
 
+// Collapse runaway repeats Whisper sometimes emits on unclear Thai audio,
+// e.g. "ความความความความ" → "ความ". Thai has no spaces, so we match repeated
+// short substrings rather than words.
+function cleanCCText(t) {
+  if (!t) return t;
+  let out = t.replace(/(.{1,8}?)\1{2,}/gu, '$1'); // 3+ repeats of a short run → 1
+  out = out.replace(/(\S+)(\s+\1){2,}/gu, '$1');  // also collapse repeated words
+  return out.trim();
+}
+
 // Decode a recorded (webm/opus/mp4) Blob into a 16kHz mono Float32Array,
 // which is the format Whisper / transformers.js expects.
 async function decodeBlobToPCM16k(blob) {
@@ -1530,8 +1553,12 @@ function startCCRecording() {
           task: 'transcribe',
           chunk_length_s: 30,
           stride_length_s: 5,
+          // Anti-hallucination: whisper-tiny loops on unclear/Thai audio
+          // ("ความความความ..."). Block repeated n-grams + penalise repeats.
+          no_repeat_ngram_size: 3,
+          repetition_penalty: 1.3,
         });
-        const text = (result.text || '').trim();
+        let text = cleanCCText((result.text || '').trim());
         if (text && text !== '[BLANK_AUDIO]') {
           document.getElementById('cc-text').textContent = text;
           document.getElementById('cc-status').textContent = '✓';
@@ -1656,8 +1683,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.4 (2026-06-24) — CC PCM-decode fix + iPad loading-hang fix
-document.getElementById('app-version').textContent = 'v2.4 (2026-06-24)';
+// AudioBook v2.5 (2026-06-24) — CC anti-repeat, play-btn state fix, iPad CC enabled
+document.getElementById('app-version').textContent = 'v2.5 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
