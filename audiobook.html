@@ -388,12 +388,14 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
             <div class="controls">
               <div style="display:flex;align-items:center;gap:2px;">
-                <button class="ctrl" onclick="changeSpeed(-1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">−</button>
-                <input type="number" id="speed-input" min="0.5" max="3.0" step="0.05" value="1.00"
+                <button type="button" class="ctrl" onclick="changeSpeed(-1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">−</button>
+                <input type="text" inputmode="decimal" id="speed-input" value="1.00"
                   style="width:48px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 2px;"
-                  oninput="setSpeedInput(this.value)" onchange="setSpeedInput(this.value)" onclick="this.select()">
+                  onfocus="this.select()"
+                  onblur="setSpeedInput(this.value)"
+                  onkeydown="if(event.key==='Enter'){setSpeedInput(this.value);this.blur();}">
                 <span style="font-size:11px;color:var(--text3);">×</span>
-                <button class="ctrl" onclick="changeSpeed(1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">+</button>
+                <button type="button" class="ctrl" onclick="changeSpeed(1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">+</button>
               </div>
               <button class="ctrl" onclick="prevChapter()">⏮</button>
               <button class="ctrl" onclick="seekRel(-15)" style="font-size:12px;">↺15</button>
@@ -468,7 +470,7 @@ const S = {
 };
 
 const audio = document.getElementById('audio');
-let toastTimer;
+let toastTimer, _lastKnownTime = 0;
 
 // ════════ UTILS ════════
 function fmt(s) {
@@ -668,16 +670,118 @@ async function listAudioFiles(fid) {
   } while (token);
   return all.sort(naturalSort);
 }
+// ════════ INDEXEDDB AUDIO CACHE ════════
+const _DB_NAME = 'ab_audio_v1', _DB_STORE = 'blobs', _CACHE_MAX_MB = 400;
+function _openDB() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(_DB_NAME, 1);
+    r.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(_DB_STORE)) {
+        db.createObjectStore(_DB_STORE, { keyPath: 'id' }).createIndex('t','t');
+      }
+    };
+    r.onsuccess = e => res(e.target.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function _dbGet(id) {
+  try {
+    const db = await _openDB();
+    return new Promise(res => {
+      const r = db.transaction(_DB_STORE).objectStore(_DB_STORE).get(id);
+      r.onsuccess = () => res(r.result || null);
+      r.onerror = () => res(null);
+    });
+  } catch(e) { return null; }
+}
+async function _dbPut(id, blob) {
+  try {
+    const db = await _openDB();
+    // Evict oldest entries if over limit
+    const all = await new Promise(res => {
+      const r = db.transaction(_DB_STORE).objectStore(_DB_STORE).index('t').getAll();
+      r.onsuccess = () => res(r.result); r.onerror = () => res([]);
+    });
+    const totalMB = all.reduce((s,e) => s+(e.sz||0),0)/(1024*1024);
+    if (totalMB + blob.size/(1024*1024) > _CACHE_MAX_MB) {
+      const tx = db.transaction(_DB_STORE,'readwrite'), st = tx.objectStore(_DB_STORE);
+      let freed = 0;
+      for (const e of all.sort((a,b)=>a.t-b.t)) {
+        st.delete(e.id); freed += (e.sz||0)/(1024*1024);
+        if (freed > 150) break;
+      }
+      await new Promise(res => { tx.oncomplete=res; tx.onerror=res; });
+    }
+    return new Promise(res => {
+      const tx2 = db.transaction(_DB_STORE,'readwrite');
+      tx2.objectStore(_DB_STORE).put({ id, blob, t:Date.now(), sz:blob.size });
+      tx2.oncomplete = () => res(true); tx2.onerror = () => res(false);
+    });
+  } catch(e) { return false; }
+}
+
+// ════════ PREFETCH CACHE ════════
+const _prefetchMap = {}; // fileId → blobUrl
+let _prefetchingId = null;
+async function prefetchChapter(idx) {
+  if (!S.book || idx < 0 || idx >= S.chapters.length) return;
+  const ch = S.chapters[idx];
+  if (_prefetchMap[ch.id] || _prefetchingId === ch.id) return;
+  // Skip if already in IndexedDB
+  const cached = await _dbGet(ch.id);
+  if (cached) return;
+  _prefetchingId = ch.id;
+  try {
+    await ensureToken();
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${ch.id}?alt=media`, {
+      headers: { Authorization: `Bearer ${S.token}` }
+    });
+    if (!r.ok) return;
+    const blob = await r.blob();
+    _prefetchMap[ch.id] = URL.createObjectURL(blob);
+    _dbPut(ch.id, blob); // also save to IndexedDB
+    // Show ⚡ indicator on chapter list item
+    const el = document.getElementById(`chi-${idx}`);
+    if (el && !el.querySelector('.pf-mark')) {
+      const m = document.createElement('span');
+      m.className='pf-mark'; m.style='font-size:10px;color:var(--green);margin-left:2px;'; m.textContent='⚡';
+      el.appendChild(m);
+    }
+  } catch(e) { /* silent fail */ } finally { _prefetchingId = null; }
+}
+
 // ── Audio Blob streaming (ใช้ Authorization header แทน access_token ใน URL) ──
 let _blobUrl = null;
 async function getAudioBlobUrl(fileId) {
+  // 1. Check in-memory prefetch cache
+  if (_prefetchMap[fileId]) {
+    const url = _prefetchMap[fileId];
+    delete _prefetchMap[fileId];
+    if (_blobUrl && _blobUrl !== url) { URL.revokeObjectURL(_blobUrl); }
+    _blobUrl = url;
+    hideLoad();
+    return _blobUrl;
+  }
+
+  // 2. Check IndexedDB cache
+  showLoad('ตรวจสอบ cache...');
+  const cached = await _dbGet(fileId);
+  if (cached?.blob) {
+    if (_blobUrl) { URL.revokeObjectURL(_blobUrl); _blobUrl = null; }
+    _blobUrl = URL.createObjectURL(cached.blob);
+    hideLoad();
+    toast('⚡ โหลดจาก cache', 1500);
+    return _blobUrl;
+  }
+
+  // 3. Fetch from Drive
   if (_blobUrl) { URL.revokeObjectURL(_blobUrl); _blobUrl = null; }
   await ensureToken();
   const r = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
     headers: { Authorization: `Bearer ${S.token}` }
   });
   if (!r.ok) throw new Error(`Drive API ${r.status}`);
-  // Stream with progress
   const total = parseInt(r.headers.get('content-length') || '0');
   let loaded = 0;
   const reader = r.body.getReader();
@@ -685,11 +789,12 @@ async function getAudioBlobUrl(fileId) {
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
-    loaded += value.length;
+    chunks.push(value); loaded += value.length;
     if (total) showLoad(`โหลดไฟล์เสียง ${Math.round(loaded/total*100)}%...`);
   }
-  const blob = new Blob(chunks, { type: r.headers.get('content-type') || 'audio/mpeg' });
+  const contentType = r.headers.get('content-type') || 'audio/mpeg';
+  const blob = new Blob(chunks, { type: contentType });
+  _dbPut(fileId, blob); // Save to IndexedDB (background)
   _blobUrl = URL.createObjectURL(blob);
   return _blobUrl;
 }
@@ -901,20 +1006,29 @@ function filterChapters(q) { renderChapterList(q); }
 // After any await, the gesture context is gone. Fix: play a silent WAV immediately
 // on user tap to mark the audio element as "user-activated" for the page session.
 function makeSilentWav() {
-  const buf = new ArrayBuffer(44);
+  // Valid 44100Hz mono 16-bit WAV with 1 silent sample (avoids error on 0-byte audio)
+  const buf = new ArrayBuffer(46);
   const v = new DataView(buf);
-  v.setUint32(0, 0x52494646); v.setUint32(4, 36, true); v.setUint32(8, 0x57415645);
-  v.setUint32(12, 0x666d7420); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
-  v.setUint16(22, 1, true); v.setUint32(24, 44100, true); v.setUint32(28, 88200, true);
-  v.setUint16(32, 2, true); v.setUint16(34, 16, true); v.setUint32(36, 0x64617461); v.setUint32(40, 0, true);
+  v.setUint32(0,0x52494646); v.setUint32(4,38,true); v.setUint32(8,0x57415645);
+  v.setUint32(12,0x666d7420); v.setUint32(16,16,true); v.setUint16(20,1,true);
+  v.setUint16(22,1,true); v.setUint32(24,44100,true); v.setUint32(28,88200,true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true);
+  v.setUint32(36,0x64617461); v.setUint32(40,2,true); v.setInt16(44,0,true); // 1 silent sample
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
 }
 let _silenceUrl = null;
+let _iosUnlocking = false;
+let _audioUnlocked = false; // once unlocked, skip silence WAV (prevents ended-event loop)
 function iosUnlockAudio() {
-  // Called synchronously from user gesture — establishes play permission for this element
+  // After first unlock, iOS remembers — skip silence to avoid 'ended' loop
+  if (_audioUnlocked) return;
   if (!_silenceUrl) _silenceUrl = makeSilentWav();
+  _iosUnlocking = true;
   audio.src = _silenceUrl;
-  audio.play().catch(() => {});
+  audio.play()
+    .then(() => { _audioUnlocked = true; })
+    .catch(() => {})
+    .finally(() => { setTimeout(() => { _iosUnlocking = false; }, 300); });
 }
 
 // ════════ MEDIA SESSION (background/lock screen play) ════════
@@ -952,11 +1066,8 @@ async function playChapter(idx, autoPlay=true) {
 
   await ensureToken();
 
-  // Reset AudioContext source if CC is active (src change requires reconnect)
-  if (S.ccOn && S.ccSource) {
-    try { S.ccSource.disconnect(); } catch(e) {}
-    S.ccSource = null;
-  }
+  // CC: MediaElementSource is permanently tied to the audio element (cannot recreate)
+  // Just reconnect to destination on canplay — do NOT null S.ccSource
 
   try {
     const blobUrl = await getAudioBlobUrl(ch.id);
@@ -966,7 +1077,14 @@ async function playChapter(idx, autoPlay=true) {
     const saved = S.progress[ch.id] || 0;
     if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
     if (S.ccOn && S.ccAudioCtx) {
-      audio.addEventListener('canplay', () => { setupCCAudioSource(); }, { once:true });
+      // Re-ensure source is connected to destination after src change
+      audio.addEventListener('canplay', () => {
+        if (S.ccSource) {
+          try { S.ccSource.connect(S.ccAudioCtx.destination); } catch(e) {}
+        } else {
+          setupCCAudioSource();
+        }
+      }, { once: true });
     }
     if (autoPlay) {
       audio.play().catch(e => {
@@ -1003,7 +1121,17 @@ function setSpeedInput(val) {
   if (!isNaN(n)) { S.speed = n; applySpeed(); }
 }
 function applySpeed() {
+  // WebKit/iOS bug: setting playbackRate on a blob URL can reset currentTime to 0
+  // Save position before, restore after a tick if it changed
+  const savedTime = audio.currentTime;
+  const wasPaused = audio.paused;
   audio.playbackRate = S.speed;
+  // Restore position if WebKit reset it (check after 30ms)
+  setTimeout(() => {
+    if (!wasPaused && Math.abs(audio.currentTime - savedTime) > 0.5 && audio.currentTime < savedTime) {
+      audio.currentTime = savedTime;
+    }
+  }, 30);
   localStorage.setItem('ab_speed', S.speed);
   const inp = document.getElementById('speed-input');
   if (inp) inp.value = S.speed.toFixed(2);
@@ -1018,6 +1146,7 @@ function saveProgress() {
 audio.addEventListener('timeupdate', () => {
   if (S.seeking) return;
   const cur=audio.currentTime, dur=audio.duration||0;
+  if (cur > 0) _lastKnownTime = cur;
   document.getElementById('cur-time').textContent = fmt(cur);
   document.getElementById('ch-dur').textContent = fmt(dur);
   document.getElementById('seek-bar').value = dur>0 ? (cur/dur)*100 : 0;
@@ -1035,12 +1164,20 @@ audio.addEventListener('loadedmetadata', () => {
 audio.addEventListener('play',  () => {
   document.getElementById('play-btn').textContent='⏸';
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  // Prefetch next chapter after 8 seconds of playback
+  if (S.idx >= 0 && S.idx < S.chapters.length - 1) {
+    setTimeout(() => { if (!audio.paused) prefetchChapter(S.idx + 1); }, 8000);
+  }
 });
 audio.addEventListener('pause', () => {
   document.getElementById('play-btn').textContent='▶';
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
 });
 audio.addEventListener('ended', () => {
+  // Ignore if silence WAV ended (prevents infinite nextChapter() loop on iOS)
+  if (_iosUnlocking) return;
+  if (audio.src === _silenceUrl) return;
+  if (!_blobUrl || audio.duration < 2) return; // sanity: must be a real chapter file
   saveProgress();
   setTimeout(() => {
     if (S.idx<S.chapters.length-1) nextChapter();
@@ -1048,18 +1185,11 @@ audio.addEventListener('ended', () => {
   }, 600);
 });
 audio.addEventListener('error', () => {
-  // Don't retry on silence URL errors (iOS unlock)
-  if (audio.src === _silenceUrl || (audio.src && audio.src.includes('blob:') && audio.duration === 0)) return;
-  if (S.idx>=0 && S.chapters[S.idx]) {
-    const t = audio.currentTime;
-    ensureToken().then(async () => {
-      try {
-        const blobUrl = await getAudioBlobUrl(S.chapters[S.idx].id);
-        audio.src = blobUrl;
-        audio.addEventListener('loadedmetadata', () => { audio.currentTime = t; audio.play().catch(() => {}); }, { once:true });
-      } catch(e) {}
-    });
-  }
+  // Suppress errors from iOS silence-unlock playback
+  if (_iosUnlocking) return;
+  if (audio.src === _silenceUrl) return;
+  // Only update UI — no auto-retry (prevents restart loop)
+  if (S.idx >= 0) document.getElementById('play-btn').textContent = '▶';
 });
 
 // ════════ PROGRESS ════════
@@ -1366,8 +1496,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.0 (2026-06-24)
-document.getElementById('app-version').textContent = 'v2.0 (2026-06-24)';
+// AudioBook v2.1 (2026-06-24)
+document.getElementById('app-version').textContent = 'v2.1 (2026-06-24)';
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
