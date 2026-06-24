@@ -1318,49 +1318,55 @@ async function loadWhisperModel() {
   }
 
   S.ccLoading = true;
-  showLoad('กำลังโหลดโมเดล Whisper AI...\n(ครั้งแรกอาจใช้เวลา 2-5 นาที ขึ้นอยู่กับอินเทอร์เน็ต)', true);
+  showLoad('กำลังโหลดโมเดล Whisper AI...', true);
   setLoadProgress(5);
-  document.getElementById('cc-text').textContent = 'กำลังโหลดโมเดล AI...';
-  document.getElementById('cc-model-info').textContent = 'Whisper Tiny (~39MB) — โหลดครั้งเดียว จากนั้นใช้ทันที';
+
+  // แสดง log ตรงใน CC panel — ไม่ต้องเปิด console
+  function ccLog(step, msg) {
+    console.log(`[CC step${step}]`, msg);
+    document.getElementById('cc-text').textContent = `(${step}/4) ${msg}`;
+  }
+  ccLog(1, 'กำลังโหลด transformers.js...');
+  document.getElementById('cc-model-info').textContent = 'Whisper Tiny ~39MB — โหลดครั้งเดียว';
 
   // Timeout 5 นาที
   let _ccTimedOut = false;
   const _ccTimeout = setTimeout(() => {
     _ccTimedOut = true;
     hideLoad(); S.ccLoading = false; S.ccTranscriber = null;
-    document.getElementById('cc-text').textContent = '⚠️ โหลดนานเกินไป — ลอง reload หน้าเว็บแล้วลองใหม่';
-    toast('โหลดโมเดลล้มเหลว (timeout)', 5000);
+    document.getElementById('cc-text').textContent = '⚠️ timeout — ลอง reload แล้วกด CC ใหม่';
+    toast('โหลดโมเดลล้มเหลว (timeout 5 นาที)', 5000);
   }, 5 * 60 * 1000);
 
   try {
     setLoadProgress(10);
-    document.getElementById('loading-msg').textContent = 'กำลังโหลด transformers.js...';
     const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
     if (_ccTimedOut) return;
 
-    // บังคับ single-threaded WASM — ไม่ต้องการ SharedArrayBuffer
-    // (GitHub Pages ไม่มี COOP/COEP headers → multi-thread mode ค้างเงียบใน Worker)
+    ccLog(2, 'ตั้งค่า ONNX runtime...');
     env.allowLocalModels = false;
     env.allowRemoteModels = true;
-    try { env.backends.onnx.wasm.numThreads = 1; } catch(e) {}
+    // ปิด Worker proxy → รันใน main thread ไม่ต้องใช้ SharedArrayBuffer
+    try { env.backends.onnx.wasm.proxy = false; } catch(e) { console.warn('proxy:', e); }
+    try { env.backends.onnx.wasm.numThreads = 1; } catch(e) { console.warn('threads:', e); }
 
     setLoadProgress(20);
-    document.getElementById('loading-msg').textContent = 'กำลังดาวน์โหลดโมเดล Whisper Tiny (~39MB)...';
+    ccLog(3, 'กำลังดาวน์โหลดโมเดล Whisper Tiny...');
 
     S.ccTranscriber = await pipeline(
       'automatic-speech-recognition', 'Xenova/whisper-tiny',
       {
         language: 'thai', task: 'transcribe',
         progress_callback: (p) => {
-          // transformers.js v2 ใช้ status: 'progress' (ไม่ใช่ 'downloading')
           const pct = typeof p.progress === 'number' ? p.progress : 0;
+          const fname = p.file ? p.file.split('/').pop() : '';
           if (pct > 0) {
             setLoadProgress(Math.min(95, 20 + pct * 0.75));
-            document.getElementById('loading-msg').textContent =
-              `โหลดโมเดล ${p.file ? p.file.split('/').pop() : ''}: ${Math.round(pct)}%`;
-          } else if (p.status === 'initiate') {
-            document.getElementById('loading-msg').textContent =
-              `เตรียมไฟล์: ${p.file ? p.file.split('/').pop() : ''}...`;
+            document.getElementById('cc-text').textContent =
+              `(3/4) ${fname}: ${Math.round(pct)}%`;
+          } else if (p.status) {
+            document.getElementById('cc-text').textContent =
+              `(3/4) ${p.status} ${fname}`;
           }
         },
       }
@@ -1370,6 +1376,7 @@ async function loadWhisperModel() {
     setLoadProgress(100);
     hideLoad();
     S.ccLoading = false;
+    ccLog(4, 'โหลดสำเร็จ — กำลังเริ่มถอดเสียง ✓');
     toast('โหลดโมเดล Whisper สำเร็จ! 🎉', 3000);
   } catch(e) {
     clearTimeout(_ccTimeout);
@@ -1377,10 +1384,10 @@ async function loadWhisperModel() {
     S.ccLoading = false;
     S.ccTranscriber = null;
     const msg = e?.message || String(e);
-    document.getElementById('cc-text').textContent = '⚠️ โหลดโมเดลล้มเหลว: ' + msg;
+    document.getElementById('cc-text').textContent = '⚠️ ERROR: ' + msg;
     document.getElementById('cc-model-info').textContent = 'ลองกด CC ใหม่ หรือ reload หน้าเว็บ';
     console.error('[CC] loadWhisperModel error:', e);
-    toast('โหลดโมเดลล้มเหลว ตรวจสอบอินเทอร์เน็ต', 5000);
+    toast('โหลดโมเดลล้มเหลว: ' + msg.slice(0, 60), 6000);
   }
 }
 
