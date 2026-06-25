@@ -499,7 +499,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
   </div>
 </div>
 
-<audio id="audio"></audio>
+<audio id="audio" preload="auto"></audio>
 
 <script async src="https://accounts.google.com/gsi/client" onload="onGsiLoad()" onerror="onGsiError()"></script>
 <script>
@@ -526,6 +526,11 @@ const S = {
 
 const audio = document.getElementById('audio');
 let toastTimer, _lastKnownTime = 0;
+
+// iOS detection — includes iPad (userAgent says "Macintosh" + touchPoints > 1 + coarse pointer)
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.userAgent.includes('Macintosh') && navigator.maxTouchPoints > 1 &&
+   !window.matchMedia('(pointer:fine)').matches);
 
 // ════════ UTILS ════════
 function fmt(s) {
@@ -1184,7 +1189,12 @@ function updateMediaSession() {
     artist: S.book?.name || '',
     album: 'AudioBook'
   });
-  navigator.mediaSession.setActionHandler('play', () => { ccPlayFade(); audio.play().catch(() => {}); });
+  navigator.mediaSession.setActionHandler('play', () => {
+    // Restore user's speed (may have been set to 1.0 by background handler)
+    if (!document.hidden) audio.playbackRate = S.speed;
+    ccPlayFade();
+    audio.play().catch(() => {});
+  });
   navigator.mediaSession.setActionHandler('pause', () => pauseWithFade());
   navigator.mediaSession.setActionHandler('previoustrack', prevChapter);
   navigator.mediaSession.setActionHandler('nexttrack', nextChapter);
@@ -1778,7 +1788,21 @@ window.addEventListener('keydown', e => {
 });
 
 // ════════ PERSIST ════════
-window.addEventListener('visibilitychange', () => { if (document.hidden) saveProgress(); });
+window.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    saveProgress();
+    // iOS fix: playbackRate != 1.0 prevents background audio (iOS can't time-stretch
+    // in background). Temporarily drop to native rate so audio survives backgrounding.
+    if (_isIOS && !audio.paused && S.speed !== 1.0) {
+      audio.playbackRate = 1.0;
+    }
+  } else {
+    // Restore user's speed when foregrounded
+    if (_isIOS && audio.playbackRate !== S.speed) {
+      audio.playbackRate = S.speed;
+    }
+  }
+});
 window.addEventListener('beforeunload', saveProgress);
 // Proactive token refresh (ทุก 5 นาที) — ถ้าเหลือ < 10 นาที refresh เงียบๆ
 // เหมือน BookVoice: ไม่ต้อง reconnect บ่อย เพราะ refresh ก่อน expire
@@ -1829,9 +1853,9 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.6 (2026-06-25) — caption sizing, speed-display sync,
-//   Drive reconnect bar, CC pause-fade, fixed-bottom captions
-document.getElementById('app-version').textContent = 'v2.6 (2026-06-25)';
+// AudioBook v2.7 (2026-06-25) — iOS background audio fix (playbackRate→1.0 on hide,
+//   restore on show), preload="auto", lock-screen play restores speed
+document.getElementById('app-version').textContent = 'v2.7 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
