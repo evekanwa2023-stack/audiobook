@@ -274,7 +274,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
           <option value="Xenova/whisper-small">Small — ไทยดีสุด · ช้า (~244MB)</option>
         </select>
       </div>
-      <div class="info-box">⚠️ บน iPad/iPhone โมเดล Small จะช้ามาก (ถอดทีละ 30 วิ) — ปล่อยให้ถอดจนจบครั้งเดียว ครั้งหน้าจะขึ้นทันทีจาก cache · ถ้าปิดกลางคันจะถอดต่อจากเดิมได้</div>
+      <div class="info-box">ถอดเสียงใน Worker thread — main thread ยังทำงานได้ปกติ ไม่หน้าแครชบน iPhone ครั้งแรกจะช้า (โหลดโมเดล) ครั้งต่อไปขึ้นทันทีจาก cache</div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-primary btn-sm" onclick="saveCCSettings()">บันทึก</button>
@@ -1425,15 +1425,67 @@ async function toggleCC() {
   await startCC();
 }
 
-// ── On-device Whisper config ──
-// Bigger model = better Thai but slower / larger download. User-selectable (⚙).
+// ── On-device Whisper config (fallback when no HF key) ──
 const CC_DEFAULT_MODEL = 'Xenova/whisper-base';
-// 30-second slices: Whisper's native window. Short slices keep the UI from
-// freezing too long per step (inference runs on the main thread on GitHub
-// Pages — no SharedArrayBuffer there) and let captions appear progressively.
 const CC_CHUNK_SEC = 30;
-
 function getCCModel() { return localStorage.getItem('ab_cc_model') || CC_DEFAULT_MODEL; }
+
+// ── CC Web Worker (runs ONNX WASM on Worker thread → main thread stays alive on iOS) ──
+// transformers.js is loaded inside the Worker via dynamic import so WASM compilation
+// never blocks the main thread (which would trigger iOS's hung-page kill).
+const _CC_WORKER_JS = `
+let _pipe = null;
+self.onmessage = async ({ data }) => {
+  const { seq, type } = data;
+  try {
+    if (type === 'load') {
+      const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+      env.allowLocalModels = false; env.allowRemoteModels = true;
+      try { env.backends.onnx.wasm.proxy = false; } catch(e) {}
+      try { env.backends.onnx.wasm.numThreads = 1; } catch(e) {}
+      _pipe = await pipeline('automatic-speech-recognition', data.model, {
+        progress_callback: p => postMessage({ seq, type:'progress', p }),
+      });
+      postMessage({ seq, type:'done' });
+    } else if (type === 'run') {
+      const result = await _pipe(data.pcm, data.opts);
+      postMessage({ seq, type:'result', result });
+    }
+  } catch(e) { postMessage({ seq, type:'error', msg: String(e) }); }
+};
+`;
+let _ccWorker = null, _ccWorkerSeq = 0;
+const _ccWorkerCbs = new Map(); // seq → {resolve, reject, onprogress}
+
+function _getCCWorker() {
+  if (_ccWorker) return _ccWorker;
+  const blob = new Blob([_CC_WORKER_JS], { type: 'text/javascript' });
+  _ccWorker = new Worker(URL.createObjectURL(blob), { type: 'module' });
+  _ccWorker.onmessage = ({ data }) => {
+    const { seq, type, p, result, msg } = data;
+    const cbs = _ccWorkerCbs.get(seq);
+    if (!cbs) return;
+    if (type === 'progress') { if (cbs.onprogress) cbs.onprogress(p); return; }
+    _ccWorkerCbs.delete(seq);
+    if (type === 'done' || type === 'result') cbs.resolve(result);
+    else cbs.reject(new Error(msg || type));
+  };
+  _ccWorker.onerror = e => {
+    console.warn('[CC Worker] failed, will fall back to main-thread mode:', e.message);
+    for (const [, c] of _ccWorkerCbs) c.reject(new Error('Worker error'));
+    _ccWorkerCbs.clear(); _ccWorker = null;
+  };
+  return _ccWorker;
+}
+function _workerSend(type, payload, onprogress, transfer) {
+  return new Promise((resolve, reject) => {
+    const seq = ++_ccWorkerSeq;
+    _ccWorkerCbs.set(seq, { resolve, reject, onprogress });
+    try { _getCCWorker().postMessage({ seq, type, ...payload }, transfer || []); }
+    catch(e) { _ccWorkerCbs.delete(seq); reject(e); }
+  });
+}
+
 function setCCStatus(t) { const e = document.getElementById('cc-status'); if (e) e.textContent = t; }
 function setCCBtnActive(on) {
   const b = document.getElementById('cc-btn'); if (!b) return;
@@ -1545,9 +1597,10 @@ async function getChapterBlobForCC(fileId) {
   return blob;
 }
 
-// Load the transformers.js Whisper pipeline (cached across chapters). Uses the
-// proven main-thread WASM config (proxy=false, single thread) so it works on
-// GitHub Pages without cross-origin isolation.
+// Load the transformers.js Whisper pipeline.
+// Strategy: try Worker mode first (ONNX runs on Worker thread, main thread stays alive
+// on iOS). If the browser can't run a module Worker with CDN imports, fall back to the
+// original main-thread mode (proxy=false, numThreads=1).
 async function loadCCModel(isActive) {
   const model = getCCModel();
   if (S.ccTranscriber && S.ccModelLoaded === model) return S.ccTranscriber;
@@ -1557,12 +1610,41 @@ async function loadCCModel(isActive) {
   document.getElementById('cc-text').textContent = 'กำลังโหลดโมเดล Whisper (ครั้งแรกครั้งเดียว)...';
   showLoad('กำลังโหลดโมเดล Whisper AI...', true);
   setLoadProgress(5);
+
+  // ── Attempt 1: Worker mode (ONNX on Worker thread → main thread stays live) ──
+  try {
+    await _workerSend('load', { model }, (p) => {
+      if (!isActive()) return;
+      const pct = typeof p.progress === 'number' ? p.progress : 0;
+      if (pct > 0) {
+        setLoadProgress(Math.min(96, 12 + pct * 0.8));
+        const fn = p.file ? p.file.split('/').pop() : '';
+        document.getElementById('cc-text').textContent = `โหลดโมเดล ${fn}: ${Math.round(pct)}%`;
+      }
+    });
+    setLoadProgress(100); hideLoad();
+    if (isActive && !isActive()) return null;
+    // Wrap Worker send as a callable function (same API as transformers.js pipeline)
+    const workerTr = async (pcm, opts) => {
+      const pcmCopy = pcm.slice(); // copy — buffer is transferred to Worker
+      return await _workerSend('run', { pcm: pcmCopy, opts }, null, [pcmCopy.buffer]);
+    };
+    workerTr._workerMode = true;
+    S.ccTranscriber = workerTr;
+    S.ccModelLoaded = model;
+    setCCStatus('(4/4) โหลดสำเร็จ — Worker mode ✓');
+    return workerTr;
+  } catch (workerErr) {
+    console.warn('[CC] Worker mode failed, falling back to main-thread:', workerErr.message);
+    _ccWorker = null; // will be recreated on next attempt
+  }
+
+  // ── Attempt 2: main-thread mode (original proxy=false approach) ──
   try {
     const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
-    env.allowLocalModels = false;
-    env.allowRemoteModels = true;
-    try { env.backends.onnx.wasm.proxy = false; } catch (e) {}
-    try { env.backends.onnx.wasm.numThreads = 1; } catch (e) {}
+    env.allowLocalModels = false; env.allowRemoteModels = true;
+    try { env.backends.onnx.wasm.proxy = false; } catch(e) {}
+    try { env.backends.onnx.wasm.numThreads = 1; } catch(e) {}
     setLoadProgress(12);
     const tr = await pipeline('automatic-speech-recognition', model, {
       progress_callback: (p) => {
@@ -1574,13 +1656,11 @@ async function loadCCModel(isActive) {
         }
       },
     });
-    setLoadProgress(100);
-    hideLoad();
+    setLoadProgress(100); hideLoad();
     if (isActive && !isActive()) return null;
-    S.ccTranscriber = tr;
-    S.ccModelLoaded = model;
+    S.ccTranscriber = tr; S.ccModelLoaded = model;
     return tr;
-  } catch (e) {
+  } catch(e) {
     hideLoad();
     throw new Error('โหลดโมเดลไม่สำเร็จ: ' + (e && e.message ? e.message : e));
   }
@@ -1791,32 +1871,36 @@ window.addEventListener('keydown', e => {
 window.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     saveProgress();
-    // iOS fix: playbackRate != 1.0 prevents background audio (iOS can't time-stretch
-    // in background). Temporarily drop to native rate so audio survives backgrounding.
-    if (_isIOS && !audio.paused && S.speed !== 1.0) {
-      audio.playbackRate = 1.0;
-    }
+    // iOS fix: playbackRate != 1.0 prevents background audio
+    if (_isIOS && !audio.paused && S.speed !== 1.0) audio.playbackRate = 1.0;
   } else {
-    // Restore user's speed when foregrounded
-    if (_isIOS && audio.playbackRate !== S.speed) {
-      audio.playbackRate = S.speed;
+    // Restore speed on foreground
+    if (_isIOS && audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
+    // Drive fix: refresh token immediately if it's close to expiry.
+    // Timers are paused while backgrounded, so the proactive interval
+    // may not have fired — check now as soon as the user returns.
+    if (S.token && S.tokenClient) {
+      const left = S.tokenExp - Date.now();
+      if (left < 20 * 60 * 1000) ensureToken().catch(() => {});
     }
   }
 });
 window.addEventListener('beforeunload', saveProgress);
 // Proactive token refresh (ทุก 5 นาที) — ถ้าเหลือ < 10 นาที refresh เงียบๆ
 // เหมือน BookVoice: ไม่ต้อง reconnect บ่อย เพราะ refresh ก่อน expire
+// Proactive token refresh — check every 2 min, refresh if < 20 min left.
+// (Widened from 5 min / 10 min so the token is renewed well before ITP
+// blocks the silent refresh on iOS Safari.)
 setInterval(async () => {
   if (!S.token || !S.tokenClient) return;
-  const timeLeft = S.tokenExp - Date.now();
-  if (timeLeft < 10 * 60 * 1000) { // เหลือ < 10 นาที → refresh ทันที
+  if (S.tokenExp - Date.now() < 20 * 60 * 1000) {
     try { await ensureToken(); } catch(e) {}
   }
-}, 5 * 60 * 1000);
-// Check ครั้งแรกหลัง 30 วินาที (ป้องกัน token ที่ restore มาและใกล้ expire แล้ว)
+}, 2 * 60 * 1000);
+// First check after 30s (catches tokens that were restored from localStorage near expiry)
 setTimeout(async () => {
   if (!S.token || !S.tokenClient) return;
-  if (S.tokenExp - Date.now() < 10 * 60 * 1000) {
+  if (S.tokenExp - Date.now() < 20 * 60 * 1000) {
     try { await ensureToken(); } catch(e) {}
   }
 }, 30 * 1000);
@@ -1853,9 +1937,9 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.7 (2026-06-25) — iOS background audio fix (playbackRate→1.0 on hide,
-//   restore on show), preload="auto", lock-screen play restores speed
-document.getElementById('app-version').textContent = 'v2.7 (2026-06-25)';
+// AudioBook v2.8 (2026-06-25) — CC via Web Worker (ONNX off main thread, no iOS page-kill),
+//   Drive: refresh on foreground + every 2 min / <20 min window
+document.getElementById('app-version').textContent = 'v2.8 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
