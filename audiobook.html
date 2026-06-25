@@ -11,7 +11,8 @@
   --accent:#8b5cf6; --acch:#a78bfa; --text:#e2e2f0; --text2:#8888aa;
   --text3:#4a4a70; --green:#34d399; --red:#f87171; --r:12px;
 }
-body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); height:100vh; overflow:hidden; display:flex; flex-direction:column; }
+html { height: 100%; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); height:100%; overflow:hidden; display:flex; flex-direction:column; }
 a { color:var(--acch); }
 .hidden { display:none !important; }
 button { cursor:pointer; }
@@ -83,7 +84,7 @@ button { cursor:pointer; }
 .google-btn svg { width:20px; height:20px; flex-shrink:0; }
 
 /* App */
-#app { width:100%; height:100vh; display:flex; flex-direction:column; }
+#app { width:100%; height:100%; display:flex; flex-direction:column; }
 header { display:flex; align-items:center; padding:0 16px; height:50px; border-bottom:1px solid var(--border); flex-shrink:0; gap:10px; }
 .h-logo { font-size:15px; font-weight:900; color:var(--acch); display:flex; align-items:center; gap:6px; white-space:nowrap; }
 .h-nav { display:flex; gap:2px; margin-left:8px; }
@@ -123,8 +124,9 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 .ch-sidebar.collapsed { width:40px; }
 .ch-inner { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
 .ch-sidebar.collapsed .ch-inner { display:none; }
-.sidebar-toggle { background:none; border:none; color:var(--text2); cursor:pointer; font-size:15px; padding:11px 0; border-bottom:1px solid var(--border); flex-shrink:0; width:100%; }
-.sidebar-toggle:hover { color:var(--text); background:var(--card); }
+.sidebar-toggle { background:var(--card); border:none; color:var(--text2); cursor:pointer; font-size:15px; padding:11px 0; border-bottom:1px solid var(--border); flex-shrink:0; width:100%; }
+.sidebar-toggle:hover { color:var(--text); background:var(--border); }
+.ch-sidebar.collapsed .sidebar-toggle { background:rgba(139,92,246,.15); color:var(--acch); }
 .ch-top { padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
 .ch-book-name { font-size:13px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .ch-meta { font-size:11px; color:var(--text2); }
@@ -146,7 +148,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 /* Player */
 .player-main { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
-.player-hero { flex:1; display:flex; align-items:flex-start; justify-content:center; padding:16px; overflow-y:auto; }
+.player-hero { flex:1; display:flex; align-items:flex-start; justify-content:center; padding:16px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
 @media (max-width:600px) { .np-cover { width:120px !important; height:120px !important; font-size:48px !important; } }
 .player-center { width:100%; max-width:340px; text-align:center; }
 .np-cover { width:160px; height:160px; border-radius:14px; margin:0 auto 18px; display:flex; align-items:center; justify-content:center; font-size:64px; box-shadow:0 14px 44px rgba(0,0,0,.6); flex-shrink:0; }
@@ -188,7 +190,9 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 /* Bookmarks */
 .bm-panel { width:250px; flex-shrink:0; border-left:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
-@media (max-width:700px) { .bm-panel { display:none !important; } }
+@media (max-width:700px) {
+  .bm-panel { position:fixed; top:50px; right:0; bottom:0; width:min(300px,90vw); z-index:500; background:var(--surface); box-shadow:-4px 0 24px rgba(0,0,0,.7); border-left:1px solid var(--border); }
+}
 .bm-head { padding:11px 12px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; flex-shrink:0; }
 .bm-head h4 { font-size:12px; font-weight:700; }
 .bm-list { flex:1; overflow-y:auto; }
@@ -2091,8 +2095,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.14 (2026-06-25) — collapsible sidebar; 2-row controls; player scrollable landscape
-document.getElementById('app-version').textContent = 'v2.14 (2026-06-25)';
+// AudioBook v2.15 (2026-06-25) — collapsible sidebar; 2-row controls; bookmark overlay on mobile; iOS viewport height fix
+document.getElementById('app-version').textContent = 'v2.15 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
