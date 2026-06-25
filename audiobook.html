@@ -441,7 +441,8 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
                   style="width:48px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 2px;"
                   onfocus="this.select()"
                   onblur="setSpeedInput(this.value)"
-                  onkeydown="if(event.key==='Enter'){setSpeedInput(this.value);this.blur();}">
+                  onkeydown="if(event.key==='Enter'){setSpeedInput(this.value);this.blur();}"><!-- speed set immediately below ↓ -->
+                <script>(function(){var s=parseFloat(localStorage.getItem('ab_speed'));var e=document.getElementById('speed-input');if(e&&s>=0.5&&s<=3){var v=s.toFixed(2);e.setAttribute('value',v);e.value=v;}})()</script>
                 <span style="font-size:11px;color:var(--text3);">×</span>
                 <button type="button" class="ctrl" onclick="changeSpeed(1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">+</button>
               </div>
@@ -2015,8 +2016,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.10 (2026-06-25) — speed display: pageshow+defaultValue fix; AirPods: devicechange auto-resume
-document.getElementById('app-version').textContent = 'v2.10 (2026-06-25)';
+// AudioBook v2.11 (2026-06-25) — speed display: inline script fix (sets value immediately at element render)
+document.getElementById('app-version').textContent = 'v2.11 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
