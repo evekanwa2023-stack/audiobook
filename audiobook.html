@@ -148,8 +148,17 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 /* Player */
 .player-main { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
-.player-hero { flex:1; display:flex; align-items:flex-start; justify-content:center; padding:16px; overflow-y:auto; -webkit-overflow-scrolling:touch; }
+.player-hero { flex:1; display:flex; align-items:center; justify-content:center; padding:16px; overflow:hidden; }
 @media (max-width:600px) { .np-cover { width:120px !important; height:120px !important; font-size:48px !important; } }
+/* Landscape compact layout */
+@media (orientation:landscape) and (max-height:520px) {
+  .np-cover { width:80px !important; height:80px !important; font-size:36px !important; margin-bottom:8px !important; }
+  .np-book { margin-bottom:8px !important; }
+  .player-hero { padding:8px 16px; align-items:flex-start; overflow-y:auto; }
+  .controls { margin-top:10px; }
+  .speed-row { margin-top:6px; }
+  .extra-ctrl { margin-top:6px; }
+}
 .player-center { width:100%; max-width:340px; text-align:center; }
 .np-cover { width:160px; height:160px; border-radius:14px; margin:0 auto 18px; display:flex; align-items:center; justify-content:center; font-size:64px; box-shadow:0 14px 44px rgba(0,0,0,.6); flex-shrink:0; }
 .np-chapter { font-size:15px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -452,6 +461,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
               <button class="ctrl" onclick="seekRel(-15)" style="font-size:12px;">↺15</button>
               <button class="ctrl play" id="play-btn" onclick="togglePlay()">▶</button>
               <button class="ctrl" onclick="seekRel(15)" style="font-size:12px;">↻15</button>
+              <button class="ctrl" onclick="seekRel(30)" style="font-size:12px;">↻30</button>
               <button class="ctrl" onclick="nextChapter()">⏭</button>
             </div>
 
@@ -473,7 +483,6 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
                 <span style="font-size:12px;">🔊</span>
                 <input type="range" class="vol-slider" id="vol-slider" min="0" max="1" step="0.05" value="1" oninput="setVol(this.value)" />
               </div>
-              <button class="ctrl" onclick="seekRel(30)" style="font-size:11px;padding:5px;">↻30</button>
               <button class="ctrl" id="bm-toggle" onclick="toggleBmPanel()" style="font-size:15px;padding:5px;">🔖</button>
               <button class="btn btn-xs" onclick="addBookmark()" style="border:1px solid var(--border);background:transparent;color:var(--text2);">+ บุ๊คมาร์ค</button>
               <button class="btn btn-xs" id="cc-btn"
@@ -1289,6 +1298,7 @@ async function playChapter(idx, autoPlay=true) {
     audio.src = blobUrl;
     audio.playbackRate = S.speed;
     const saved = S.progress[ch.id] || 0;
+    if (!autoPlay) audio.load(); // Force iOS to load metadata even without user-initiated play
     if (saved > 5) audio.addEventListener('loadedmetadata', () => { audio.currentTime = saved; }, { once:true });
     if (S.ccOn) {
       // Captions on → load/transcribe the newly-selected chapter.
@@ -2095,8 +2105,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.15 (2026-06-25) — collapsible sidebar; 2-row controls; bookmark overlay on mobile; iOS viewport height fix
-document.getElementById('app-version').textContent = 'v2.15 (2026-06-25)';
+// AudioBook v2.16 (2026-06-25) — fix seek (remove touch-scroll conflict); ↻30 back in controls; restore position with audio.load()
+document.getElementById('app-version').textContent = 'v2.16 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
