@@ -437,6 +437,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
               <div style="display:flex;align-items:center;gap:2px;">
                 <button type="button" class="ctrl" onclick="changeSpeed(-1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">−</button>
                 <input type="text" inputmode="decimal" id="speed-input" value="1.00"
+                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                   style="width:48px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 2px;"
                   onfocus="this.select()"
                   onblur="setSpeedInput(this.value)"
@@ -1297,13 +1298,21 @@ async function playChapter(idx, autoPlay=true) {
   renderBmList();
 }
 
+// Tracks whether the LAST pause was user-initiated (UI button press).
+// Used by the AirPods devicechange handler to distinguish "user paused"
+// (should NOT auto-resume) from "system paused" (AirPod removal, audio
+// interruption — SHOULD auto-resume when AirPods reconnect).
+let _userPaused = false;
+
 function togglePlay() {
   if (S.idx < 0) { if (S.chapters.length) playChapter(0); return; }
   if (audio.paused) {
+    _userPaused = false;
     audio.playbackRate = S.speed; // ensure rate is correct before play
     ccPlayFade();                 // ramp CC graph back up (no-op if CC off)
     audio.play().catch(() => {});
   } else {
+    _userPaused = true; // explicit UI pause — don't auto-resume on AirPod reconnect
     pauseWithFade();
   }
 }
@@ -1360,6 +1369,7 @@ audio.addEventListener('loadedmetadata', () => {
   }
 });
 audio.addEventListener('play',  () => {
+  _userPaused = false; // cleared on any play (including AirPod auto-resume)
   document.getElementById('play-btn').textContent='⏸';
   ccPlayFade(); // restore CC graph volume (no-op if CC off)
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
@@ -1935,6 +1945,25 @@ window.addEventListener('visibilitychange', () => {
   }
 });
 window.addEventListener('beforeunload', saveProgress);
+// AirPods / Bluetooth headphone auto-resume:
+// When AirPods are removed, iOS pauses audio (system pause, not user pause).
+// When reinserted, MediaSession 'play' may or may not fire depending on firmware.
+// 'devicechange' fires reliably when the audio route changes, so we use it
+// as a fallback: if audio is paused AND it wasn't paused by the user pressing
+// the UI button, resume automatically.
+try {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (audio.paused && !_userPaused && S.idx >= 0 && !document.hidden) {
+      // Wait 600ms for the new audio route to settle before playing
+      setTimeout(() => {
+        if (audio.paused && !_userPaused && S.idx >= 0) {
+          audio.playbackRate = S.speed;
+          audio.play().catch(() => {});
+        }
+      }, 600);
+    }
+  });
+} catch (e) {}
 // Proactive token refresh (ทุก 5 นาที) — ถ้าเหลือ < 10 นาที refresh เงียบๆ
 // เหมือน BookVoice: ไม่ต้อง reconnect บ่อย เพราะ refresh ก่อน expire
 // Proactive token refresh — check every 2 min, refresh if < 20 min left.
@@ -1986,8 +2015,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.9 (2026-06-25) — Drive folder picker: global search; speed restore on audio resume
-document.getElementById('app-version').textContent = 'v2.9 (2026-06-25)';
+// AudioBook v2.10 (2026-06-25) — speed display: pageshow+defaultValue fix; AirPods: devicechange auto-resume
+document.getElementById('app-version').textContent = 'v2.10 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
@@ -2003,12 +2032,20 @@ function ccFontSize(dir) {
 }
 applyCCFontSize();
 
-// ── Fix: speed input showed hardcoded 1.00 after reload even when the real
-//   playbackRate was the saved value. Sync the display to S.speed on boot. ──
-(function syncSpeedDisplay() {
+// ── Speed display sync ──
+// Safari (especially iOS) can override input.value after the script runs via
+// form-state restoration or BFCache. Fix: sync on initial load AND on pageshow
+// (which fires on BFCache restore). Also stamp defaultValue so any browser
+// reset always uses the correct saved speed, not the hardcoded "1.00".
+function syncSpeedDisplay() {
   const inp = document.getElementById('speed-input');
-  if (inp) inp.value = S.speed.toFixed(2);
-})();
+  if (!inp) return;
+  const v = S.speed.toFixed(2);
+  inp.setAttribute('value', v); // updates defaultValue (used by browser form-restore)
+  inp.value = v;                // updates live display
+}
+syncSpeedDisplay();
+window.addEventListener('pageshow', syncSpeedDisplay); // re-sync on BFCache restore
 </script>
 <div id="app-version" style="position:fixed;bottom:6px;right:10px;font-size:10px;opacity:0.3;color:#fff;pointer-events:none;z-index:9999;"></div>
 </body>
