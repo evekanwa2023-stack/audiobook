@@ -118,8 +118,13 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 #book-view { flex:1; display:flex; overflow:hidden; }
 
 /* Sidebar */
-.ch-sidebar { width:270px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
-@media (max-width:600px) { .ch-sidebar { width:200px; } }
+.ch-sidebar { width:270px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; transition:width .22s ease; }
+@media (max-width:600px) { .ch-sidebar { width:210px; } }
+.ch-sidebar.collapsed { width:40px; }
+.ch-inner { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
+.ch-sidebar.collapsed .ch-inner { display:none; }
+.sidebar-toggle { background:none; border:none; color:var(--text2); cursor:pointer; font-size:15px; padding:11px 0; border-bottom:1px solid var(--border); flex-shrink:0; width:100%; }
+.sidebar-toggle:hover { color:var(--text); background:var(--card); }
 .ch-top { padding:12px 14px; border-bottom:1px solid var(--border); flex-shrink:0; }
 .ch-book-name { font-size:13px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .ch-meta { font-size:11px; color:var(--text2); }
@@ -141,7 +146,8 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
 /* Player */
 .player-main { flex:1; display:flex; flex-direction:column; overflow:hidden; min-width:0; }
-.player-hero { flex:1; display:flex; align-items:center; justify-content:center; padding:16px; overflow:hidden; }
+.player-hero { flex:1; display:flex; align-items:flex-start; justify-content:center; padding:16px; overflow-y:auto; }
+@media (max-width:600px) { .np-cover { width:120px !important; height:120px !important; font-size:48px !important; } }
 .player-center { width:100%; max-width:340px; text-align:center; }
 .np-cover { width:160px; height:160px; border-radius:14px; margin:0 auto 18px; display:flex; align-items:center; justify-content:center; font-size:64px; box-shadow:0 14px 44px rgba(0,0,0,.6); flex-shrink:0; }
 .np-chapter { font-size:15px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -152,7 +158,8 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 .seek-bar::-moz-range-thumb { width:14px; height:14px; border-radius:50%; background:var(--acch); border:none; }
 .book-prog { margin-top:8px; font-size:10px; color:var(--text3); }
 
-.controls { display:flex; align-items:center; justify-content:center; gap:12px; margin-top:18px; }
+.controls { display:flex; align-items:center; justify-content:center; gap:10px; margin-top:18px; flex-wrap:wrap; }
+.speed-row { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:10px; }
 .ctrl { background:none; border:none; color:var(--text2); font-size:17px; padding:7px; border-radius:50%; transition:all .15s; display:flex; align-items:center; justify-content:center; }
 .ctrl:hover { color:var(--text); background:var(--card); }
 .ctrl.play { background:var(--accent); color:#fff; font-size:20px; width:50px; height:50px; border-radius:50%; }
@@ -407,15 +414,18 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 
     <!-- Book / Player -->
     <div id="book-view" class="hidden">
-      <aside class="ch-sidebar">
-        <div class="ch-top">
-          <div class="ch-book-name" id="sb-name">—</div>
-          <div class="ch-meta" id="sb-meta"></div>
+      <aside class="ch-sidebar" id="ch-sidebar">
+        <button class="sidebar-toggle" id="sidebar-toggle-btn" onclick="toggleSidebar()" title="หุบ/ขยาย สารบัญ">◀</button>
+        <div class="ch-inner">
+          <div class="ch-top">
+            <div class="ch-book-name" id="sb-name">—</div>
+            <div class="ch-meta" id="sb-meta"></div>
+          </div>
+          <div class="ch-search">
+            <input type="text" placeholder="🔍 ค้นหาบท..." oninput="filterChapters(this.value)" id="ch-search-input" />
+          </div>
+          <div class="ch-list" id="ch-list"></div>
         </div>
-        <div class="ch-search">
-          <input type="text" placeholder="🔍 ค้นหาบท..." oninput="filterChapters(this.value)" id="ch-search-input" />
-        </div>
-        <div class="ch-list" id="ch-list"></div>
       </aside>
 
       <div class="player-main">
@@ -434,25 +444,24 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
             <div class="book-prog" id="book-prog"></div>
 
             <div class="controls">
-              <div style="display:flex;align-items:center;gap:2px;">
-                <button type="button" class="ctrl" onclick="changeSpeed(-1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">−</button>
-                <input type="text" inputmode="decimal" id="speed-input" value="1.00"
-                  autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-                  style="width:48px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 2px;"
-                  onfocus="this.select()"
-                  onblur="setSpeedInput(this.value)"
-                  onkeydown="if(event.key==='Enter'){setSpeedInput(this.value);this.blur();}"><!-- speed set immediately below ↓ -->
-                <script>(function(){var s=parseFloat(localStorage.getItem('ab_speed'));var e=document.getElementById('speed-input');if(e&&s>=0.5&&s<=3){var v=s.toFixed(2);e.setAttribute('value',v);e.value=v;}})()</script>
-                <span style="font-size:11px;color:var(--text3);">×</span>
-                <button type="button" class="ctrl" onclick="changeSpeed(1)" style="width:26px;height:26px;font-size:16px;padding:0;line-height:1;">+</button>
-              </div>
               <button class="ctrl" onclick="prevChapter()">⏮</button>
               <button class="ctrl" onclick="seekRel(-15)" style="font-size:12px;">↺15</button>
               <button class="ctrl play" id="play-btn" onclick="togglePlay()">▶</button>
               <button class="ctrl" onclick="seekRel(15)" style="font-size:12px;">↻15</button>
-              <button class="ctrl" onclick="seekRel(30)" style="font-size:12px;">↻30</button>
               <button class="ctrl" onclick="nextChapter()">⏭</button>
-              <button class="ctrl" id="bm-toggle" onclick="toggleBmPanel()">🔖</button>
+            </div>
+
+            <div class="speed-row">
+              <button type="button" class="ctrl" onclick="changeSpeed(-1)" style="width:28px;height:28px;font-size:18px;padding:0;line-height:1;">−</button>
+              <input type="text" inputmode="decimal" id="speed-input" value="1.00"
+                autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                style="width:52px;text-align:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;padding:4px 2px;"
+                onfocus="this.select()"
+                onblur="setSpeedInput(this.value)"
+                onkeydown="if(event.key==='Enter'){setSpeedInput(this.value);this.blur();}"><!-- speed set immediately below ↓ -->
+              <script>(function(){var s=parseFloat(localStorage.getItem('ab_speed'));var e=document.getElementById('speed-input');if(e&&s>=0.5&&s<=3){var v=s.toFixed(2);e.setAttribute('value',v);e.value=v;}})()</script>
+              <span style="font-size:12px;color:var(--text3);">×</span>
+              <button type="button" class="ctrl" onclick="changeSpeed(1)" style="width:28px;height:28px;font-size:18px;padding:0;line-height:1;">+</button>
             </div>
 
             <div class="extra-ctrl">
@@ -460,6 +469,8 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
                 <span style="font-size:12px;">🔊</span>
                 <input type="range" class="vol-slider" id="vol-slider" min="0" max="1" step="0.05" value="1" oninput="setVol(this.value)" />
               </div>
+              <button class="ctrl" onclick="seekRel(30)" style="font-size:11px;padding:5px;">↻30</button>
+              <button class="ctrl" id="bm-toggle" onclick="toggleBmPanel()" style="font-size:15px;padding:5px;">🔖</button>
               <button class="btn btn-xs" onclick="addBookmark()" style="border:1px solid var(--border);background:transparent;color:var(--text2);">+ บุ๊คมาร์ค</button>
               <button class="btn btn-xs" id="cc-btn"
                 style="background:rgba(52,211,153,.12);color:var(--green);border:1px solid rgba(52,211,153,.25);"
@@ -1945,6 +1956,27 @@ function stopCC() {
   // Keep S.ccSegments + the IndexedDB cache so re-enabling is instant.
 }
 
+// ════════ SIDEBAR TOGGLE ════════
+function toggleSidebar() {
+  const sidebar = document.getElementById('ch-sidebar');
+  const btn = document.getElementById('sidebar-toggle-btn');
+  const collapsed = sidebar.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '▶' : '◀';
+  localStorage.setItem('ab_sidebar_collapsed', collapsed ? '1' : '0');
+}
+(function initSidebar() {
+  const saved = localStorage.getItem('ab_sidebar_collapsed');
+  // Default collapsed on narrow screens unless user explicitly opened it
+  const collapse = saved === '1' || (saved === null && window.innerWidth <= 480);
+  if (collapse) {
+    const sidebar = document.getElementById('ch-sidebar');
+    const btn = document.getElementById('sidebar-toggle-btn');
+    if (sidebar) sidebar.classList.add('collapsed');
+    if (btn) btn.textContent = '▶';
+    if (saved === null) localStorage.setItem('ab_sidebar_collapsed', '1');
+  }
+})();
+
 // ════════ VIEW ════════
 function switchView(v) {
   const lib=document.getElementById('library-view'), bk=document.getElementById('book-view');
@@ -2059,8 +2091,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.13 (2026-06-25) — background speed: don't reset to 1.0x; recover via pause event if older iOS needs it
-document.getElementById('app-version').textContent = 'v2.13 (2026-06-25)';
+// AudioBook v2.14 (2026-06-25) — collapsible sidebar; 2-row controls; player scrollable landscape
+document.getElementById('app-version').textContent = 'v2.14 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
