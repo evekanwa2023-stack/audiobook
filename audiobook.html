@@ -953,11 +953,13 @@ async function getAudioBlobUrl(fileId) {
 async function openFolderPicker() {
   if (!S.token) { toast('กรุณาเข้าสู่ระบบก่อน'); return; }
   S.folderStack = [{ id:'root', name:'My Drive' }];
+  S.isGlobalSearch = false;
   document.getElementById('folder-modal').classList.remove('hidden');
   await renderFolderList('root', 'My Drive');
 }
 function closeFolderModal() { document.getElementById('folder-modal').classList.add('hidden'); }
 async function renderFolderList(pid, pname) {
+  S.isGlobalSearch = false;
   document.getElementById('folder-modal-title').textContent = `📁 ${pname}`;
   document.getElementById('folder-search').value = '';
   showLoad('กำลังโหลดโฟลเดอร์...');
@@ -973,10 +975,29 @@ async function renderFolderList(pid, pname) {
   } catch(e) { hideLoad(); toast('เกิดข้อผิดพลาด: ' + e.message, 4000); }
 }
 function renderFolderItems(folders, audios) {
-  const pid = S.folderStack[S.folderStack.length-1].id;
-  const pname = S.folderStack[S.folderStack.length-1].name;
   const list = document.getElementById('folder-list');
   list.innerHTML = '';
+
+  // ── Global search results mode ──
+  if (S.isGlobalSearch) {
+    const hdr = document.createElement('div');
+    hdr.style = 'padding:6px 14px 2px;font-size:10px;color:var(--text3);letter-spacing:.5px;text-transform:uppercase;';
+    hdr.textContent = '🔍 ผลการค้นหาทั้ง Drive';
+    list.appendChild(hdr);
+    if (!folders.length) {
+      list.innerHTML += '<div style="padding:24px;text-align:center;color:var(--text3);">ไม่พบโฟลเดอร์</div>';
+      return;
+    }
+    folders.forEach(f => {
+      const item = mkFolderItem(f, false);
+      item.onclick = () => { S.isGlobalSearch = false; S.folderStack.push({id:f.id,name:f.name}); renderFolderList(f.id,f.name); };
+      list.appendChild(item);
+    });
+    return;
+  }
+
+  const pid = S.folderStack[S.folderStack.length-1].id;
+  const pname = S.folderStack[S.folderStack.length-1].name;
 
   // ── Back button ──
   if (S.folderStack.length > 1) {
@@ -1048,10 +1069,31 @@ function mkFolder(icon, name, sub, hasArr) {
     </span>${hasArr?'<span style="color:var(--text3);">›</span>':''}`;
   return d;
 }
+let _folderSearchTimer = null;
 function filterFolders() {
-  const q = document.getElementById('folder-search').value.toLowerCase().trim();
-  const filtered = q ? S.allFolders.filter(f => f.name.toLowerCase().includes(q)) : S.allFolders;
-  renderFolderItems(filtered, S.allAudios);
+  const q = document.getElementById('folder-search').value.trim();
+  const ql = q.toLowerCase();
+  clearTimeout(_folderSearchTimer);
+  if (!q) {
+    S.isGlobalSearch = false;
+    renderFolderItems(S.allFolders, S.allAudios);
+    return;
+  }
+  // Show local matches immediately while waiting for API
+  S.isGlobalSearch = false;
+  renderFolderItems(S.allFolders.filter(f => f.name.toLowerCase().includes(ql)), S.allAudios);
+  // Drive-wide search after 500ms debounce
+  _folderSearchTimer = setTimeout(async () => {
+    try {
+      const safe = q.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const d = await driveList(
+        `mimeType='application/vnd.google-apps.folder' and name contains '${safe}' and trashed=false`,
+        'files(id,name,modifiedTime)'
+      );
+      S.isGlobalSearch = true;
+      renderFolderItems(d.files || [], []);
+    } catch(e) { /* local filter already shown as fallback */ }
+  }, 500);
 }
 function applyFolderSort() {
   const v = document.getElementById('folder-sort').value;
@@ -1191,9 +1233,11 @@ function updateMediaSession() {
   });
   navigator.mediaSession.setActionHandler('play', () => {
     // Restore user's speed (may have been set to 1.0 by background handler)
-    if (!document.hidden) audio.playbackRate = S.speed;
+    if (!document.hidden && audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
     ccPlayFade();
-    audio.play().catch(() => {});
+    // Guard: calling audio.play() on an already-playing audio on iOS can cause
+    // brief audio glitches.  Only call it when actually paused.
+    if (audio.paused) audio.play().catch(() => {});
   });
   navigator.mediaSession.setActionHandler('pause', () => pauseWithFade());
   navigator.mediaSession.setActionHandler('previoustrack', prevChapter);
@@ -1319,6 +1363,11 @@ audio.addEventListener('play',  () => {
   document.getElementById('play-btn').textContent='⏸';
   ccPlayFade(); // restore CC graph volume (no-op if CC off)
   if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  // Restore speed after any auto-resume (e.g. after audio interruption):
+  // pauseWithFade() resets playbackRate→1.0 before pausing; if the system
+  // auto-resumes our audio (notification ends, phone call ends) the 'play'
+  // event fires but playbackRate is still 1.0.  Fix it here while foreground.
+  if (!document.hidden && audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
   // Prefetch next chapter after 8 seconds of playback
   if (S.idx >= 0 && S.idx < S.chapters.length - 1) {
     setTimeout(() => { if (!audio.paused) prefetchChapter(S.idx + 1); }, 8000);
@@ -1937,9 +1986,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.8 (2026-06-25) — CC via Web Worker (ONNX off main thread, no iOS page-kill),
-//   Drive: refresh on foreground + every 2 min / <20 min window
-document.getElementById('app-version').textContent = 'v2.8 (2026-06-25)';
+// AudioBook v2.9 (2026-06-25) — Drive folder picker: global search; speed restore on audio resume
+document.getElementById('app-version').textContent = 'v2.9 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
