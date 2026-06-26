@@ -699,8 +699,17 @@ async function handleToken(resp) {
   } catch(e) {}
   restoreUserAvatar();
   showScreen('app');
-  switchView('library');
-  renderLibrary();
+  if (S.idx >= 0 && S.book) {
+    // Book is loaded — stay on player, resume if audio was interrupted
+    switchView('book');
+    if (audio.paused && !_userPaused) {
+      audio.play().catch(() => {});
+    }
+    toast('☁️ เชื่อมต่อ Drive แล้ว');
+  } else {
+    switchView('library');
+    renderLibrary();
+  }
 }
 function restoreUserAvatar() {
   if (!S.user) return;
@@ -758,32 +767,73 @@ async function ensureToken() {
 }
 
 // ── Drive reconnect bar (shown when silent refresh fails, e.g. iOS ITP) ──
+let _autoReconnectTimer = null;
 function showReconnectBar() {
   const bar = document.getElementById('drive-reconnect-bar');
   if (bar) bar.style.display = 'flex';
+  // ลองครั้งเดียวหลัง 5 วิ (ได้ผลบน desktop; iOS ต้องกดปุ่มเอง)
+  if (!_autoReconnectTimer && S.tokenClient) {
+    _autoReconnectTimer = setTimeout(() => { _autoReconnectTimer = null; _tryAutoReconnect(); }, 5000);
+  }
 }
 function hideReconnectBar() {
   const bar = document.getElementById('drive-reconnect-bar');
   if (bar) bar.style.display = 'none';
+  if (_autoReconnectTimer) { clearTimeout(_autoReconnectTimer); _autoReconnectTimer = null; }
+}
+async function _tryAutoReconnect() {
+  try {
+    await new Promise((res, rej) => {
+      const orig = S.tokenClient.callback;
+      const to = setTimeout(() => { S.tokenClient.callback = orig; rej(); }, 6000);
+      S.tokenClient.callback = r => {
+        clearTimeout(to); S.tokenClient.callback = orig;
+        if (r && !r.error) {
+          S.token = r.access_token;
+          S.tokenExp = Date.now() + (r.expires_in * 1000) - 60000;
+          localStorage.setItem('ab_tok', S.token);
+          localStorage.setItem('ab_tokexp', S.tokenExp.toString());
+          res();
+        } else rej();
+      };
+      S.tokenClient.requestAccessToken({ prompt: '' });
+    });
+    hideReconnectBar();
+    if (audio.paused && !_userPaused && S.idx >= 0) audio.play().catch(() => {});
+    toast('☁️ เชื่อมต่อ Drive อีกครั้งแล้ว');
+  } catch(e) { /* ล้มเหลว — แสดงปุ่มให้กดเอง, ไม่ retry */ }
 }
 async function tapReconnect() {
   const btn = document.getElementById('reconnect-btn');
   if (btn) btn.textContent = 'กำลังเชื่อมต่อ...';
+  if (_autoReconnectTimer) { clearTimeout(_autoReconnectTimer); _autoReconnectTimer = null; }
   try {
-    await new Promise((res) => {
+    await new Promise((res, rej) => {
       const orig = S.tokenClient.callback;
-      S.tokenClient.callback = r => { S.tokenClient.callback = orig; orig && orig(r); res(); };
+      const to = setTimeout(() => { S.tokenClient.callback = orig; rej(new Error('timeout')); }, 10000);
+      S.tokenClient.callback = r => {
+        clearTimeout(to); S.tokenClient.callback = orig;
+        if (r && !r.error) {
+          S.token = r.access_token;
+          S.tokenExp = Date.now() + (r.expires_in * 1000) - 60000;
+          localStorage.setItem('ab_tok', S.token);
+          localStorage.setItem('ab_tokexp', S.tokenExp.toString());
+          res();
+        } else rej(new Error(r?.error || 'failed'));
+      };
       S.tokenClient.requestAccessToken({ prompt: '' });
     });
-  } catch(e) {}
-  if (btn) btn.textContent = 'เชื่อมต่อ Drive ใหม่';
-  if (Date.now() < S.tokenExp && S.token) {
     hideReconnectBar();
-    toast('☁️ เชื่อมต่อ Drive อีกครั้งแล้ว');
-  } else {
-    // Silent failed → fall back to interactive sign-in (needs user gesture; we have one)
-    try { S.tokenClient.requestAccessToken(); } catch(e) {}
+    // Resume playback from where it was — don't navigate away
+    if (audio.paused && !_userPaused && S.idx >= 0) audio.play().catch(() => {});
+    if (S.idx >= 0) toast('☁️ เชื่อมต่อ Drive แล้ว กำลังเล่นต่อ');
+    else toast('☁️ เชื่อมต่อ Drive อีกครั้งแล้ว');
+  } catch(e) {
+    if (btn) btn.textContent = 'เชื่อมต่อ Drive ใหม่';
+    // Silent failed → interactive (needs user gesture; we have one from the button tap)
+    try { S.tokenClient.requestAccessToken(); } catch(e2) {}
   }
+  if (btn) btn.textContent = 'เชื่อมต่อ Drive ใหม่';
 }
 
 // ════════ DRIVE API ════════
@@ -1271,7 +1321,7 @@ function updateMediaSession() {
   });
   navigator.mediaSession.setActionHandler('play', () => {
     // Restore user's speed (may have been set to 1.0 by background handler)
-    if (!document.hidden && audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
+    if (audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
     ccPlayFade();
     // Guard: calling audio.play() on an already-playing audio on iOS can cause
     // brief audio glitches.  Only call it when actually paused.
@@ -1448,7 +1498,7 @@ audio.addEventListener('play',  () => {
   // pauseWithFade() resets playbackRate→1.0 before pausing; if the system
   // auto-resumes our audio (notification ends, phone call ends) the 'play'
   // event fires but playbackRate is still 1.0.  Fix it here while foreground.
-  if (!document.hidden && audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
+  if (audio.playbackRate !== S.speed) audio.playbackRate = S.speed;
   // Prefetch next chapter after 8 seconds of playback
   if (S.idx >= 0 && S.idx < S.chapters.length - 1) {
     setTimeout(() => { if (!audio.paused) prefetchChapter(S.idx + 1); }, 8000);
@@ -2158,8 +2208,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.17 (2026-06-25) — wider player on tablet/desktop; double-tap/click left/right to skip ±15s
-document.getElementById('app-version').textContent = 'v2.17 (2026-06-25)';
+// AudioBook v2.20 (2026-06-25) — auto-reconnect 1 attempt; speed restore always; reconnect stays on player
+document.getElementById('app-version').textContent = 'v2.20 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
