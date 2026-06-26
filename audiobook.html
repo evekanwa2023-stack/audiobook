@@ -160,6 +160,8 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
   .extra-ctrl { margin-top:6px; }
 }
 .player-center { width:100%; max-width:340px; text-align:center; }
+@media (min-width:768px) { .player-center { max-width:520px; } .np-cover { width:200px !important; height:200px !important; font-size:80px !important; } }
+@media (min-width:1100px) { .player-center { max-width:640px; } }
 .np-cover { width:160px; height:160px; border-radius:14px; margin:0 auto 18px; display:flex; align-items:center; justify-content:center; font-size:64px; box-shadow:0 14px 44px rgba(0,0,0,.6); flex-shrink:0; }
 .np-chapter { font-size:15px; font-weight:700; margin-bottom:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .np-book { font-size:11px; color:var(--text2); margin-bottom:16px; }
@@ -181,6 +183,16 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
 .vol-row { display:flex; align-items:center; gap:6px; }
 .vol-slider { width:65px; -webkit-appearance:none; appearance:none; height:3px; border-radius:2px; background:var(--border); outline:none; cursor:pointer; }
 .vol-slider::-webkit-slider-thumb { -webkit-appearance:none; width:12px; height:12px; border-radius:50%; background:var(--text2); cursor:pointer; }
+
+/* Skip flash (double-tap/double-click feedback) */
+.skip-flash { position:absolute; top:50%; transform:translateY(-50%); pointer-events:none;
+  background:rgba(255,255,255,.18); border-radius:50%; width:80px; height:80px;
+  display:flex; align-items:center; justify-content:center; font-size:22px; font-weight:700; color:#fff;
+  animation:skipFlash .5s ease forwards; z-index:10; }
+.skip-flash.left { left:12%; }
+.skip-flash.right { right:12%; }
+@keyframes skipFlash { 0%{opacity:1;transform:translateY(-50%) scale(1)} 100%{opacity:0;transform:translateY(-50%) scale(1.4)} }
+.player-hero { position:relative; }
 
 /* CC Panel */
 .cc-panel { position:fixed; left:0; right:0; bottom:0; z-index:9000;
@@ -442,7 +454,7 @@ header { display:flex; align-items:center; padding:0 16px; height:50px; border-b
       </aside>
 
       <div class="player-main">
-        <div class="player-hero">
+        <div class="player-hero" id="player-hero">
           <div class="player-center">
             <div class="np-cover" id="np-cover">🎧</div>
             <div class="np-chapter" id="np-chapter">เลือกบทเพื่อเล่น</div>
@@ -1351,6 +1363,39 @@ function pauseWithFade() {
 function prevChapter() { if (audio.currentTime>5) { audio.currentTime=0; return; } if (S.idx>0) playChapter(S.idx-1); }
 function nextChapter() { if (S.idx<S.chapters.length-1) playChapter(S.idx+1); else toast('จบเล่มแล้ว! 🎉'); }
 function seekRel(s) { audio.currentTime = Math.max(0, Math.min(audio.duration||0, audio.currentTime+s)); }
+
+// ── Double-tap / Double-click skip ──
+let _lastPlayerTap = { t:0, x:0 };
+function _skipFromHeroEvent(clientX, heroEl, isTouchEnd) {
+  if (S.idx < 0) return;
+  const rect = heroEl.getBoundingClientRect();
+  const isLeft = clientX < rect.left + rect.width * 0.5;
+  seekRel(isLeft ? -15 : 15);
+  // Flash indicator
+  const flash = document.createElement('div');
+  flash.className = 'skip-flash ' + (isLeft ? 'left' : 'right');
+  flash.textContent = isLeft ? '−15s' : '+15s';
+  heroEl.appendChild(flash);
+  setTimeout(() => flash.remove(), 550);
+}
+function onPlayerDblClick(e) {
+  if (['BUTTON','INPUT','A','LABEL'].includes(e.target.tagName)) return;
+  _skipFromHeroEvent(e.clientX, e.currentTarget, false);
+}
+function onPlayerTouchEnd(e) {
+  if (['BUTTON','INPUT','A','LABEL'].includes(e.target.tagName)) return;
+  const touch = e.changedTouches[0];
+  const now = Date.now();
+  const dx = Math.abs(touch.clientX - _lastPlayerTap.x);
+  const dt = now - _lastPlayerTap.t;
+  if (dt < 350 && dx < 60) {
+    _skipFromHeroEvent(touch.clientX, e.currentTarget, true);
+    e.preventDefault();
+    _lastPlayerTap.t = 0;
+  } else {
+    _lastPlayerTap = { t:now, x:touch.clientX };
+  }
+}
 function onSeekInput(v) { S.seeking=true; document.getElementById('cur-time').textContent=fmt((v/100)*(audio.duration||0)); }
 function onSeekChange(v) { S.seeking=false; audio.currentTime=(v/100)*(audio.duration||0); }
 function setVol(v) { audio.volume=parseFloat(v); }
@@ -1970,6 +2015,14 @@ function stopCC() {
   // Keep S.ccSegments + the IndexedDB cache so re-enabling is instant.
 }
 
+// ════════ PLAYER HERO DOUBLE-TAP / DOUBLE-CLICK ════════
+(function() {
+  const hero = document.getElementById('player-hero');
+  if (!hero) return;
+  hero.addEventListener('dblclick', onPlayerDblClick);
+  hero.addEventListener('touchend', onPlayerTouchEnd, { passive:false });
+})();
+
 // ════════ SIDEBAR TOGGLE ════════
 function toggleSidebar() {
   const sidebar = document.getElementById('ch-sidebar');
@@ -2105,8 +2158,8 @@ else if (S.token && S.tokenExp > Date.now()) {
 }
 
 // ════════ VERSION ════════
-// AudioBook v2.16 (2026-06-25) — fix seek (remove touch-scroll conflict); ↻30 back in controls; restore position with audio.load()
-document.getElementById('app-version').textContent = 'v2.16 (2026-06-25)';
+// AudioBook v2.17 (2026-06-25) — wider player on tablet/desktop; double-tap/click left/right to skip ±15s
+document.getElementById('app-version').textContent = 'v2.17 (2026-06-25)';
 
 // ── Caption font size (persisted) ──
 function applyCCFontSize() {
